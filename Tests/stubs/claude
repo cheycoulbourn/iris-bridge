@@ -1,0 +1,12 @@
+#!/bin/sh
+case "$1" in
+  auth) echo '{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai","email":"stub@example.com"}'; exit 0;;
+  install|--version) echo "9.9.9"; exit 0;;
+  -p)
+    INPUT=$(cat)
+    if echo "$INPUT" | grep -q "FAIL-PLEASE"; then echo '{"type":"result","subtype":"error","is_error":true}'; exit 1; fi
+    echo '{"type":"system","subtype":"init","model":"claude-stub","apiKeySource":"none"}'
+    echo '{"type":"result","subtype":"success","structured_output":{"reply":"Stub reply.","proposal":null}}'
+    exit 0;;
+esac
+exit 1

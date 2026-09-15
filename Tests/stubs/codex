@@ -1,0 +1,5 @@
+#!/bin/sh
+if [ "$1" = "login" ]; then echo "Logged in using ChatGPT" >&2; exit 0; fi
+cat >/dev/null
+echo '{"type":"item.completed","item":{"type":"agent_message","text":"{\"reply\":\"Codex stub.\",\"proposal\":null}"}}'
+echo '{"type":"turn.completed"}'

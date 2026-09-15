@@ -24,7 +24,11 @@ CODE=$(curl -sk -X POST -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PO
 PROOF=$(printf '%s' "$FP" | openssl dgst -sha256 -hmac "$CODE" | awk '{print $NF}')
 TOKEN=$(curl -sk -X POST "https://127.0.0.1:$PORT/pair" -d "{\"deviceName\":\"CI\",\"platform\":\"mac\",\"proof\":\"$PROOF\"}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 test -n "$TOKEN"
-curl -sk -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/status" | grep -q '"version":2'
+# Asserted before any /message call: if the stubs are not the ones answering, the account email will not be
+# the stub's, and the run stops before a prompt reaches a real Claude Code or Codex.
+STATUS=$(curl -sk -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/status")
+printf '%s' "$STATUS" | grep -q '"version":2'
+printf '%s' "$STATUS" | grep -q 'stub@example.com'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m1","provider":"claude","message":"hello"}' | grep -q 'Stub reply.'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m2","provider":"codex","message":"hello"}' | grep -q 'Codex stub.'
 curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m3","provider":"claude","message":"FAIL-PLEASE"}' | grep -q '502'
@@ -35,4 +39,5 @@ curl -sk -X DELETE -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/ad
 curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"provider":"claude","message":"x"}' | grep -q '401'
 grep -q "paired device" "$ROOT/logs/bridge.log"
 ! grep -q "hello" "$ROOT/logs/bridge.log"
+! grep -q "hello" "$ROOT/serve.log"
 echo "integration: ok"

@@ -3,6 +3,19 @@ import Network
 import Security
 
 public final class BridgeServer: @unchecked Sendable {
+    /// Ceiling on connections the listener will hold at once. `newConnectionLimit` is a budget that the
+    /// framework spends as it delivers connections, so `release` tops it back up as connections close.
+    private static let maximumConnections = 16
+    /// How long a peer may sit on an accepted connection without finishing a request.
+    private static let receiveTimeout: TimeInterval = 30
+
+    /// Per-connection bookkeeping. Every field is touched only on `queue`, which is serial and is also the
+    /// queue the listener, the connection state handler and the receive completions run on.
+    private final class ConnectionState {
+        var finished = false
+        var released = false
+    }
+
     private let listener: NWListener
     private let router: Router
     private let log: BridgeLog?
@@ -10,6 +23,7 @@ public final class BridgeServer: @unchecked Sendable {
     private let work = DispatchQueue(label: "iris-bridge.work", attributes: .concurrent)
     public private(set) var actualPort: UInt16?
     private let requestedPort: UInt16
+    private var activeConnections = 0
 
     public init(port: UInt16, identity: BridgeIdentity, router: Router, serviceName: String, advertise: Bool, log: BridgeLog?) throws {
         self.router = router; self.log = log; self.requestedPort = port
@@ -20,6 +34,7 @@ public final class BridgeServer: @unchecked Sendable {
         let parameters = NWParameters(tls: tls)
         parameters.allowLocalEndpointReuse = true
         listener = try NWListener(using: parameters, on: port == 0 ? .any : NWEndpoint.Port(rawValue: port)!)
+        listener.newConnectionLimit = Self.maximumConnections
         if advertise {
             listener.service = NWListener.Service(name: serviceName, type: "_iris-bridge._tcp", domain: nil,
                                                   txtRecord: NWTXTRecord(["v": "2", "fp": identity.fingerprint, "name": serviceName]))
@@ -34,15 +49,39 @@ public final class BridgeServer: @unchecked Sendable {
             switch state {
             case .ready: self?.actualPort = self?.listener.port?.rawValue; ready.signal()
             case .failed(let error): failure = error; ready.signal()
-            case .waiting: failure = BridgeError.message("Iris Bridge could not use port \(attemptedPort). Another copy may be running; run `iris-bridge uninstall` or close the old helper, then try again."); ready.signal()
+            case .waiting: failure = Self.portInUse(attemptedPort); ready.signal()
             default: break
             }
         }
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.start(queue: queue)
         ready.wait()
-        if let failure { throw failure }
+        if let failure {
+            // A busy port usually arrives as .failed(POSIXErrorCode: 48 Address already in use) rather than
+            // .waiting, so both routes give the same friendly instruction.
+            throw Self.isAddressInUse(failure) ? Self.portInUse(attemptedPort) : failure
+        }
+        // Once the listener is up, failures are asynchronous and would otherwise be silent: the helper would
+        // sit there answering nothing. Exit instead so launchd's KeepAlive restarts a healthy copy.
+        listener.stateUpdateHandler = { [weak self] state in
+            switch state {
+            case .failed(let error), .waiting(let error):
+                self?.log?.error("listener failed: \(error)")
+                exit(1)
+            case .cancelled: self?.log?.info("listener cancelled")
+            default: break
+            }
+        }
         log?.info("listening on \(actualPort ?? 0)")
+    }
+
+    private static func portInUse(_ port: UInt16) -> Error {
+        BridgeError.message("Iris Bridge could not use port \(port). Another copy may be running; run `iris-bridge uninstall` or close the old helper, then try again.")
+    }
+
+    private static func isAddressInUse(_ error: Error) -> Bool {
+        if let error = error as? NWError, case .posix(.EADDRINUSE) = error { return true }
+        return "\(error)".contains("Address already in use")
     }
 
     public func stop() { listener.cancel() }
@@ -50,24 +89,53 @@ public final class BridgeServer: @unchecked Sendable {
     private func accept(_ connection: NWConnection) {
         let parser = HTTPRequestParser()
         let context = Self.context(for: connection)
-        connection.stateUpdateHandler = { state in if case .failed = state { connection.cancel() } }
+        let state = ConnectionState()
+        activeConnections += 1
+        connection.stateUpdateHandler = { [weak self] update in
+            switch update {
+            case .failed: self?.release(state); connection.cancel()
+            case .cancelled: self?.release(state)
+            default: break
+            }
+        }
         connection.start(queue: queue)
-        receive(connection, parser: parser, context: context)
+        // Covers the receive phase only. A peer that completes TLS and then says nothing would otherwise pin
+        // the connection forever. `finished` is set the moment the request is in hand, so a slow generate is
+        // never cut short.
+        queue.asyncAfter(deadline: .now() + Self.receiveTimeout) { [weak self] in
+            guard let self, !state.finished else { return }
+            self.log?.info("closing idle connection from \(context.sourceAddress)")
+            connection.cancel()
+        }
+        receive(connection, parser: parser, context: context, state: state)
     }
 
-    private func receive(_ connection: NWConnection, parser: HTTPRequestParser, context: RequestContext) {
+    /// Gives one connection's slot back to the listener. Idempotent: `.failed` is followed by `.cancelled`.
+    private func release(_ state: ConnectionState) {
+        guard !state.released else { return }
+        state.released = true
+        state.finished = true
+        activeConnections = max(0, activeConnections - 1)
+        listener.newConnectionLimit = Self.maximumConnections - activeConnections
+    }
+
+    private func receive(_ connection: NWConnection, parser: HTTPRequestParser, context: RequestContext, state: ConnectionState) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, complete, error in
             guard let self else { return }
-            if let error { self.log?.error("receive failed: \(error)"); connection.cancel(); return }
+            if let error { state.finished = true; self.log?.error("receive failed: \(error)"); connection.cancel(); return }
             switch parser.feed(data ?? Data()) {
             case .needMore:
-                if complete { connection.cancel() } else { self.receive(connection, parser: parser, context: context) }
+                if complete { state.finished = true; connection.cancel() }
+                else { self.receive(connection, parser: parser, context: context, state: state) }
             case .invalid(let reason):
+                state.finished = true
                 self.log?.info("invalid request from \(context.sourceAddress): \(reason)")
                 self.reply(connection, HTTPResponse(status: 400, error: "Bad request"))
             case .tooLarge:
+                state.finished = true
                 self.reply(connection, HTTPResponse(status: 413, error: "This message is too large. Attach fewer files."))
             case .complete(let request):
+                state.finished = true
                 self.work.async {
                     let response = self.router.handle(request, context: context)
                     self.reply(connection, response)

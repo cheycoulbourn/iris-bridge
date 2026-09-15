@@ -1,0 +1,26 @@
+Building for debugging...
+[Planning deferred tasks]
+[15 / 26] IrisBridgeCoreTests-product
+[26 / 94]
+[35 / 94]
+[37 / 94]
+[45 / 94]
+[49 / 94]
+[54 / 94]
+[59 / 94]
+[60 / 94]
+[71 / 94]
+[74 / 94]
+[76 / 94]
+[79 / 94]
+[80 / 94]
+[88 / 94] IrisBridgeCoreTests-product
+[90 / 94] IrisBridgeCoreTests-product
+/Users/cheycoulbourn/Documents/iris-bridge/.build/out/Products/Debug/IrisBridgeCoreTests.xctest: resource fork, Finder information, or similar detritus not allowed
+error: CodeSign /Users/cheycoulbourn/Documents/iris-bridge/.build/out/Products/Debug/IrisBridgeCoreTests.xctest failed with a nonzero exit code. Command line:     cd /Users/cheycoulbourn/Documents/iris-bridge
+    
+    Signing Identity:     "-"
+    
+    /usr/bin/codesign --force --sign - --entitlements /Users/cheycoulbourn/Documents/iris-bridge/.build/out/Intermediates.noindex/iris-bridge.build/Debug/IrisBridgeCoreTests-p.build/IrisBridgeCoreTests.xctest.xcent --timestamp\=none --generate-entitlement-der /Users/cheycoulbourn/Documents/iris-bridge/.build/out/Products/Debug/IrisBridgeCoreTests.xctest
+error: Build failed
+error: fatalError

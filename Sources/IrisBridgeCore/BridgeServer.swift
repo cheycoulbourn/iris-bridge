@@ -9,9 +9,10 @@ public final class BridgeServer: @unchecked Sendable {
     private let queue = DispatchQueue(label: "iris-bridge.server")
     private let work = DispatchQueue(label: "iris-bridge.work", attributes: .concurrent)
     public private(set) var actualPort: UInt16?
+    private let requestedPort: UInt16
 
     public init(port: UInt16, identity: BridgeIdentity, router: Router, serviceName: String, advertise: Bool, log: BridgeLog?) throws {
-        self.router = router; self.log = log
+        self.router = router; self.log = log; self.requestedPort = port
         let tls = NWProtocolTLS.Options()
         guard let secIdentity = sec_identity_create(identity.secIdentity) else { throw CertificateError.importFailed(-1) }
         sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
@@ -27,11 +28,13 @@ public final class BridgeServer: @unchecked Sendable {
 
     public func start() throws {
         let ready = DispatchSemaphore(value: 0)
+        let attemptedPort = requestedPort
         var failure: Error?
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready: self?.actualPort = self?.listener.port?.rawValue; ready.signal()
             case .failed(let error): failure = error; ready.signal()
+            case .waiting: failure = BridgeError.message("Iris Bridge could not use port \(attemptedPort). Another copy may be running; run `iris-bridge uninstall` or close the old helper, then try again."); ready.signal()
             default: break
             }
         }

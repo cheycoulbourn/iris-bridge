@@ -33,5 +33,28 @@ final class HTTPTests: XCTestCase {
         XCTAssertTrue(text.contains("Connection: close\r\n"))
         XCTAssertTrue(text.contains("Cache-Control: no-store\r\n"))
         XCTAssertTrue(text.hasSuffix("{\"error\":\"Pair this device again.\"}"))
+        XCTAssertTrue(text.contains("Content-Length: \(response.body.count)\r\n"))
+        let serialized = response.serialized()
+        let blankLine = serialized.range(of: Data("\r\n\r\n".utf8))!
+        XCTAssertEqual(serialized[blankLine.upperBound...], response.body)
+    }
+    func testBodySplitAcrossChunksAndTerminatorSplit() {
+        let parser = HTTPRequestParser()
+        let raw = "POST /m HTTP/1.1\r\nContent-Length: 10\r\n\r\n0123456789"
+        let data = Data(raw.utf8)
+        let terminatorSplit = data.range(of: Data("\r\n\r\n".utf8))!.lowerBound + 3
+        guard case .needMore = parser.feed(data.prefix(terminatorSplit)) else { return XCTFail() }
+        guard case .needMore = parser.feed(Data("\n01234".utf8)) else { return XCTFail() }
+        guard case .complete(let request) = parser.feed(Data("56789".utf8)) else { return XCTFail() }
+        XCTAssertEqual(request.method, "POST"); XCTAssertEqual(request.path, "/m")
+        XCTAssertEqual(String(data: request.body, encoding: .utf8), "0123456789")
+    }
+    func testHeaderCapAppliesWhenTerminatorArrivesInSameChunk() {
+        let parser = HTTPRequestParser()
+        let prefix = "GET /status HTTP/1.1\r\nX-Pad: "
+        let padding = String(repeating: "a", count: 70_000 - prefix.utf8.count - 4)
+        let raw = prefix + padding + "\r\n\r\n"
+        XCTAssertEqual(raw.utf8.count, 70_000)
+        guard case .invalid = parser.feed(Data(raw.utf8)) else { return XCTFail() }
     }
 }

@@ -13,29 +13,45 @@ public final class HTTPRequestParser {
     private var buffer = Data()
     private let maxBody: Int
     private let maxHead = 64 * 1024
+    // Parsed head, cached after the first time the terminator is found so later
+    // feeds during body accumulation never rescan the buffer.
+    private var headParsed = false
+    private var method = ""
+    private var path = ""
+    private var headers: [String: String] = [:]
+    private var bodyStart = 0
+    private var length = 0
     public init(maxBody: Int = 28_000_000) { self.maxBody = maxBody }
     public func feed(_ data: Data) -> Outcome {
         buffer.append(data)
-        guard let headEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else {
-            return buffer.count > maxHead ? .invalid("Header too large") : .needMore
+        if !headParsed {
+            guard let headEnd = buffer.range(of: Data("\r\n\r\n".utf8)) else {
+                return buffer.count > maxHead ? .invalid("Header too large") : .needMore
+            }
+            guard headEnd.upperBound <= maxHead else { return .invalid("Header too large") }
+            guard let head = String(data: buffer[..<headEnd.lowerBound], encoding: .utf8) else { return .invalid("Header not UTF-8") }
+            var lines = head.components(separatedBy: "\r\n")
+            let requestLine = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true)
+            guard requestLine.count == 3, requestLine[2].hasPrefix("HTTP/1."),
+                  ["GET", "POST", "DELETE"].contains(String(requestLine[0])), requestLine[1].hasPrefix("/") else { return .invalid("Bad request line") }
+            var parsedHeaders: [String: String] = [:]
+            for line in lines where !line.isEmpty {
+                guard let colon = line.firstIndex(of: ":") else { return .invalid("Bad header") }
+                parsedHeaders[line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
+            let parsedLength = Int(parsedHeaders["content-length"] ?? "0") ?? -1
+            guard parsedLength >= 0 else { return .invalid("Bad content length") }
+            guard parsedLength <= maxBody else { return .tooLarge }
+            method = String(requestLine[0])
+            path = String(requestLine[1])
+            headers = parsedHeaders
+            length = parsedLength
+            bodyStart = headEnd.upperBound
+            headParsed = true
         }
-        guard let head = String(data: buffer[..<headEnd.lowerBound], encoding: .utf8) else { return .invalid("Header not UTF-8") }
-        var lines = head.components(separatedBy: "\r\n")
-        let requestLine = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true)
-        guard requestLine.count == 3, requestLine[2].hasPrefix("HTTP/1."),
-              ["GET", "POST", "DELETE"].contains(String(requestLine[0])), requestLine[1].hasPrefix("/") else { return .invalid("Bad request line") }
-        var headers: [String: String] = [:]
-        for line in lines where !line.isEmpty {
-            guard let colon = line.firstIndex(of: ":") else { return .invalid("Bad header") }
-            headers[line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()] = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-        }
-        let length = Int(headers["content-length"] ?? "0") ?? -1
-        guard length >= 0 else { return .invalid("Bad content length") }
-        guard length <= maxBody else { return .tooLarge }
-        let bodyStart = headEnd.upperBound
-        guard buffer.count - bodyStart >= length else { return .needMore }
+        guard buffer.endIndex - bodyStart >= length else { return .needMore }
         let body = buffer.subdata(in: bodyStart..<(bodyStart + length))
-        return .complete(HTTPRequest(method: String(requestLine[0]), path: String(requestLine[1]), headers: headers, body: body))
+        return .complete(HTTPRequest(method: method, path: path, headers: headers, body: body))
     }
 }
 

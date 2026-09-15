@@ -16,7 +16,7 @@ public final class BridgeLog: @unchecked Sendable {
             try? FileManager.default.moveItem(atPath: file.path, toPath: file.path + ".1")
         }
         if let handle = try? FileHandle(forWritingTo: file) {
-            handle.seekToEndOfFile(); handle.write(Data(line.utf8)); try? handle.close()
+            _ = try? handle.seekToEnd(); try? handle.write(contentsOf: Data(line.utf8)); try? handle.close()
         } else {
             try? Data(line.utf8).write(to: file)
         }

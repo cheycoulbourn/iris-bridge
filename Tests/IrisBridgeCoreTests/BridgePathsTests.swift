@@ -28,4 +28,11 @@ final class BridgePathsTests: XCTestCase {
         let size = try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? Int ?? 0
         XCTAssertLessThan(size, 200 + 80)
     }
+    func testErrorLinesAreTagged() throws {
+        let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        let file = base.appendingPathComponent("bridge.log")
+        BridgeLog(file: file).error("boom")
+        XCTAssertTrue(try String(contentsOf: file, encoding: .utf8).contains(" ERROR boom"))
+    }
 }

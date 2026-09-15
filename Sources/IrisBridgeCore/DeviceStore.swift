@@ -27,7 +27,8 @@ public final class DeviceStore: @unchecked Sendable {
     }
     public static func randomToken() -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
-        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        precondition(status == errSecSuccess, "Iris Bridge could not generate a secure random token (\(status)).")
         return Data(bytes).base64EncodedString().replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
     }
     public func issue(name: String, platform: String) throws -> (device: PairedDevice, token: String) {

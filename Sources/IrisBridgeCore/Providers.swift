@@ -9,17 +9,28 @@ public protocol ProcessRunner {
 
 public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
     private let lock = NSLock()
+    private let now: () -> Date
     private var active: [String: Process] = [:]
     private var canceled: [String: Date] = [:]
-    public init() {}
-    public func markCanceled(_ id: String) {
+    /// `now` dates the cancellation bookkeeping only; run timeouts always use the wall clock.
+    public init(now: @escaping () -> Date = Date.init) { self.now = now }
+    /// Records the request as canceled and signals its process group if it is still running.
+    public func cancel(requestID: String) {
         lock.lock(); defer { lock.unlock() }
-        canceled = canceled.filter { Date().timeIntervalSince($0.value) < 600 }
-        canceled[id] = Date()
-        if let process = active[id], process.isRunning { kill(-process.processIdentifier, SIGTERM) }
+        let stamp = now()
+        canceled = canceled.filter { stamp.timeIntervalSince($0.value) < 600 }
+        canceled[requestID] = stamp
+        if let process = active[requestID], process.isRunning { kill(-process.processIdentifier, SIGTERM) }
     }
+    public func markCanceled(_ id: String) { cancel(requestID: id) }
     public func clearCanceled(_ id: String) { lock.lock(); canceled[id] = nil; lock.unlock() }
-    private func isCanceled(_ id: String?) -> Bool { guard let id else { return false }; lock.lock(); defer { lock.unlock() }; return canceled[id] != nil }
+    private func isCanceled(_ id: String?) -> Bool {
+        guard let id else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard let marked = canceled[id] else { return false }
+        guard now().timeIntervalSince(marked) < 600 else { canceled[id] = nil; return false }
+        return true
+    }
     public func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
         if isCanceled(requestID) { throw BridgeError.canceled }
         let process = Process()
@@ -28,19 +39,25 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
         process.environment = ProviderService.subscriptionEnvironment(from: ProcessInfo.processInfo.environment)
         let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         process.standardInput = stdin; process.standardOutput = stdout; process.standardError = stderr
+        // The clock starts before the child launches so a stdin write cannot outlive the timeout.
+        let deadline = Date().addingTimeInterval(timeout)
         try process.run()
-        // New process group so cancellation can signal the CLI and its children together.
-        setpgid(process.processIdentifier, process.processIdentifier)
         if let requestID { lock.lock(); active[requestID] = process; lock.unlock() }
         defer { if let requestID { lock.lock(); active[requestID] = nil; lock.unlock() } }
         var outData = Data(), errData = Data()
         let group = DispatchGroup()
         group.enter(); DispatchQueue.global().async { outData = stdout.fileHandleForReading.readDataToEndOfFile(); group.leave() }
         group.enter(); DispatchQueue.global().async { errData = stderr.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-        if let input { stdin.fileHandleForWriting.write(Data(input.utf8)) }
-        try? stdin.fileHandleForWriting.close()
-        let deadline = Date().addingTimeInterval(timeout)
+        group.enter(); DispatchQueue.global().async {
+            let handle = stdin.fileHandleForWriting
+            // Report a broken pipe as an error instead of killing this process when the child is signaled.
+            fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+            if let input { try? handle.write(contentsOf: Data(input.utf8)) }
+            try? handle.close()
+            group.leave()
+        }
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        // Foundation launches the child as its own process-group leader, so the group signal reaches its children too.
         if process.isRunning { kill(-process.processIdentifier, SIGTERM); process.waitUntilExit(); group.wait(); throw BridgeError.timeout }
         group.wait()
         if isCanceled(requestID) { throw BridgeError.canceled }
@@ -78,6 +95,7 @@ public final class ProviderService: @unchecked Sendable {
     private let now: () -> Date
     private var statusCache: [String: (Date, ProviderStatus)] = [:]
     private var lastClaudeUpdate: Date?
+    private var claudeUpdateInFlight = false
     private let lock = NSLock()
     public init(runner: ProcessRunner, executableLookup: @escaping (String) -> String? = ProviderService.findExecutable, now: @escaping () -> Date = Date.init) {
         self.runner = runner; lookup = executableLookup; self.now = now
@@ -153,7 +171,11 @@ public final class ProviderService: @unchecked Sendable {
             guard let initEvent = events.first(where: { $0["type"] as? String == "system" && $0["subtype"] as? String == "init" && $0["model"] is String }) else {
                 throw BridgeError.message("Claude Code did not identify the responding model. Nothing was changed.")
             }
-            if let source = initEvent["apiKeySource"] as? String, source != "none" { throw BridgeError.message("Claude selected API-key billing. Use your Claude account sign-in and try again.") }
+            // Python rejects anything but a missing value or the literal 'none'; a JSON null counts as missing.
+            let keySource = initEvent["apiKeySource"]
+            if keySource != nil, !(keySource is NSNull), (keySource as? String) != "none" {
+                throw BridgeError.message("Claude selected API-key billing. Use your Claude account sign-in and try again.")
+            }
             if let structured = end["structured_output"] as? [String: Any] { output = structured }
             else if let text = end["result"] as? String, let parsed = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] { output = parsed }
             else { throw BridgeError.message("The provider returned an unreadable response. Nothing was changed.") }
@@ -193,13 +215,26 @@ public final class ProviderService: @unchecked Sendable {
         return output
     }
     private func updateClaudeIfDue(binary: String) throws {
-        lock.lock(); let due = lastClaudeUpdate.map { now().timeIntervalSince($0) >= 3600 } ?? true; lock.unlock()
-        guard due else { return }
+        lock.lock()
+        let previous = lastClaudeUpdate
+        let due = previous.map { now().timeIntervalSince($0) >= 3600 } ?? true
+        guard due, !claudeUpdateInFlight else { lock.unlock(); return }
+        // Claim the slot before releasing the lock so a concurrent request cannot start a second install.
+        claudeUpdateInFlight = true
+        lastClaudeUpdate = now()
+        lock.unlock()
+        var succeeded = false
+        defer {
+            lock.lock()
+            claudeUpdateInFlight = false
+            if !succeeded { lastClaudeUpdate = previous } // Failed attempt: let the next request retry.
+            lock.unlock()
+        }
         let updated = try runner.run([binary, "install", "latest"], input: nil, cwd: nil, timeout: 180, requestID: nil)
         let version = try runner.run([binary, "--version"], input: nil, cwd: nil, timeout: 20, requestID: nil)
         guard updated.status == 0, version.status == 0 else { throw BridgeError.message("Claude Code could not update. Open Claude Code on your Mac, update it, and try again.") }
         guard status("claude", bypassCache: true).ready else { throw BridgeError.message("Claude Code needs you to sign in again after its update. Open Claude Code on your Mac and sign in, then retry.") }
-        lock.lock(); lastClaudeUpdate = now(); lock.unlock()
+        succeeded = true
     }
     private static func events(_ stdout: String) -> [[String: Any]] {
         stdout.split(separator: "\n").compactMap { line in

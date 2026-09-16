@@ -15,6 +15,8 @@ public struct BridgePaths: Sendable {
     public var identityPassphrase: URL { root.appendingPathComponent("identity-passphrase") }
     public var adminToken: URL { root.appendingPathComponent("admin-token") }
     public var devices: URL { root.appendingPathComponent("devices.json") }
+    public var inbox: URL { root.appendingPathComponent("inbox.json") }
+    public var context: URL { root.appendingPathComponent("context.json") }
     public var logFile: URL { logs.appendingPathComponent("bridge.log") }
 
     public func prepare() throws {

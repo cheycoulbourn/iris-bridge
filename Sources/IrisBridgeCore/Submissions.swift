@@ -73,6 +73,24 @@ public struct Submission: Codable, Equatable, Identifiable {
     }
 }
 
+extension Submission {
+    /// What to call this submission in a list. A post carries its own title, a series its name; a submission
+    /// with neither is malformed rather than nameless, and still has to print as a line.
+    public var displayTitle: String {
+        if let title = post?.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
+        if let name = series?.name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return name }
+        return kind == .series ? "Untitled series" : "Untitled post"
+    }
+
+    /// How long this has been waiting, in the shortest form that is still true: "3m", "2h", "1d".
+    public func ageText(now: Date = Date()) -> String {
+        let seconds = max(0, now.timeIntervalSince(createdAt))
+        if seconds < 3600 { return "\(Int(seconds) / 60)m" }
+        if seconds < 86_400 { return "\(Int(seconds) / 3600)h" }
+        return "\(Int(seconds) / 86_400)d"
+    }
+}
+
 public struct WorkspaceContext: Codable, Equatable {   // pushed by the app
     public var creatorName: String
     public var pillars: [ContextPillar]

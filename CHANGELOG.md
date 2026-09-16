@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.0
+
+- Your agent can send work to Iris. `iris-bridge mcp` is an MCP server for Claude Code with five tools:
+  `iris_get_workspace_context`, `iris_submit_post`, `iris_submit_series`, `iris_list_submissions` and
+  `iris_revise_submission`. Register it with
+  `claude mcp add iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp`.
+- A submission queue on the Mac (`inbox.json`), read and decided by the Iris app over the new `GET /inbox`,
+  `POST /inbox/{id}/decision` and `PUT /context` endpoints. Nothing is saved into the planner until the
+  creator approves it in Iris, and nothing is ever published to a platform.
+- A workspace snapshot the app pushes and the agent reads, so plans use pillar, platform and format names
+  that already exist rather than invented ones.
+- `iris-bridge inbox` lists what is waiting, with how long it has been waiting; `iris-bridge inbox
+  clear-decided` forgets decided submissions older than 30 days. The helper also prunes them at startup, so
+  the file the app downloads does not grow forever.
+- The installer ends with the line that registers the tools in Claude Code.
+
+The protocol version stays 2: every endpoint here is additive. The app's minimum helper version for Inbox
+features is 0.2.0; older helpers still chat.
+
 ## 0.1.1
 
 - `GET /status` no longer tells the network who is signed in. An unauthenticated caller sees whether each

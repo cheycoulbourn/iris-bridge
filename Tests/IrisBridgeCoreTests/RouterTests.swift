@@ -327,4 +327,28 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(all.1.count, 2)
         XCTAssertEqual(send("GET", "/admin/inbox", auth: token, loopback: false).0, 404)
     }
+
+    /// `iris-bridge inbox clear-decided`. Pending work is never old enough to go, however long it has been
+    /// sitting there: nobody has looked at it yet.
+    func testAdminInboxPruneDropsDecidedSubmissionsOlderThanThirtyDays() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        var clock = Date(timeIntervalSince1970: 1_000_000)
+        inbox = InboxStore(file: dir.appendingPathComponent("inbox.json"), now: { clock })
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: generator, log: nil)
+        let decided = submit(title: "Long ago")
+        _ = try! inbox.decide(id: decided.id, status: .approved, comment: nil)
+        let stillWaiting = submit(title: "Never looked at")
+        clock = clock.addingTimeInterval(31 * 24 * 60 * 60)
+        let recent = submit(title: "Yesterday")
+        _ = try! inbox.decide(id: recent.id, status: .denied, comment: "Not this week.")
+
+        XCTAssertEqual(send("POST", "/admin/inbox/prune", auth: "admin-secret", loopback: false).0, 404)
+        XCTAssertEqual(send("POST", "/admin/inbox/prune", auth: "wrong", loopback: true).0, 401)
+        let (status, body) = send("POST", "/admin/inbox/prune", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(body["removed"] as? Int, 1)
+        XCTAssertEqual(inbox.all(since: Date(timeIntervalSince1970: 0)).map(\.id).sorted(), [recent.id, stillWaiting.id].sorted())
+    }
 }

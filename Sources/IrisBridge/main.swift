@@ -1,7 +1,7 @@
 import Foundation
 import IrisBridgeCore
 
-let usage = "Usage: iris-bridge [serve|pair|status|devices|revoke <id>|install-agent --binary <path>|uninstall|version]"
+let usage = "Usage: iris-bridge [serve|pair|status|devices|revoke <id>|inbox [clear-decided]|mcp|install-agent --binary <path>|uninstall|version]"
 
 func complain(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -29,6 +29,11 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     let devices = DeviceStore(file: paths.devices)
     let pairing = PairingCodeStore()
     let inbox = InboxStore(file: paths.inbox)
+    // Decided submissions are history, not a queue, and nothing else ever deletes them: without this a Mac
+    // that runs for a year keeps every approval it ever made in the file the app downloads.
+    if let removed = try? inbox.pruneDecided(olderThan: 30 * 24 * 60 * 60), removed > 0 {
+        log.info("pruned \(removed) decided submissions older than 30 days")
+    }
     let context = ContextStore(file: paths.context)
     let router = Router(fingerprint: identity.fingerprint, hostName: HostName.computerName(), adminToken: adminToken, devices: devices, pairing: pairing,
                         inbox: inbox, context: context, generator: LiveGenerator(), log: log)
@@ -97,6 +102,29 @@ do {
         // The id is the first real argument: `revoke --root /tmp/x abc` revokes abc, not --root.
         guard let id = line.positionals.first else { refuse("Usage: iris-bridge revoke <device-id>") }
         print(try AdminClient(paths: paths, port: port).revoke(id) ? "Revoked \(id). That device will ask to reconnect." : "No device with id \(id).")
+    case "inbox":
+        let client = try AdminClient(paths: paths, port: port)
+        if line.positionals.first == "clear-decided" {
+            let removed = try client.pruneDecided()
+            print(removed == 1 ? "Removed 1 decided submission older than 30 days."
+                               : "Removed \(removed) decided submissions older than 30 days.")
+        } else if let first = line.positionals.first {
+            refuse("Usage: iris-bridge inbox [clear-decided] (I do not know \"\(first)\").")
+        } else {
+            let waiting = try client.listSubmissions(status: "pending")
+            if waiting.isEmpty {
+                print("Nothing is waiting. Your agent has not sent anything yet.")
+            }
+            let now = Date()
+            for submission in waiting {
+                print("\(submission.id)  \(submission.kind.rawValue)  \(submission.displayTitle)  \(submission.ageText(now: now))")
+            }
+        }
+    case "mcp":
+        // stdout belongs to JSON-RPC from here on. Nothing else may print to it, which is why this branch
+        // has no `print` of its own and the server writes through the transport.
+        let server = MCPServer(client: LoopbackAdminClient(paths: paths, port: port), version: BridgeVersion.current)
+        try server.run(transport: StdioMCPTransport())
     case "install-agent":
         guard let typed = line.options["--binary"] else { refuse("Usage: iris-bridge install-agent --binary <path>") }
         // launchd needs an absolute path and will not tell you if the program is missing: it just fails to

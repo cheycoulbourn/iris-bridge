@@ -156,6 +156,11 @@ public final class Router: @unchecked Sendable {
             let id = String(path.dropFirst("/admin/devices/".count))
             return (try? devices.revoke(id: id)) == true ? HTTPResponse(status: 200, json: ["revoked": id]) : HTTPResponse(status: 404, error: "unknown-device")
         case ("POST", "/admin/inbox"): return adminSubmit(request)
+        case ("POST", "/admin/inbox/prune"):
+            // `iris-bridge inbox clear-decided`. Thirty days is the same window `all(since:)` shows by
+            // default, so pruning never takes away something the app would still have listed.
+            do { return HTTPResponse(status: 200, json: ["removed": try inbox.pruneDecided(olderThan: 30 * 24 * 60 * 60)]) }
+            catch { return HTTPResponse(status: 500, error: "Could not clear decided submissions.") }
         case ("GET", "/admin/inbox"):
             let all = request.query["status"] == "all"
             return Self.encoded(200, all ? inbox.all(since: Date(timeIntervalSince1970: 0)) : inbox.pending)

@@ -202,6 +202,11 @@ main() {
   if [ "$IRIS_BRIDGE_COMMAND" != "iris-bridge" ]; then
     note "On this Mac that command is: $IRIS_BRIDGE_COMMAND pair"
   fi
+  # The MCP line is printed with $HOME unexpanded on purpose: it is meant to be copied into a shell, where
+  # it will expand, and the literal form is the one that keeps working if the home folder ever moves.
+  printf '\n'
+  note "Next: give Claude Code these tools with:"
+  note '  claude mcp add iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp'
 }
 
 main "$@"

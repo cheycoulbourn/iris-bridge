@@ -50,6 +50,62 @@ curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/mess
 curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m3","provider":"claude","message":"FAIL-PLEASE"}' | grep -q '502'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/cancel" -d '{"id":"m9"}' | grep -q '"canceled":true'
 curl -sk -o /dev/null -w '%{http_code}' -H "Origin: https://evil.example" "https://127.0.0.1:$PORT/status" | grep -q '403'
+# Before the app has ever pushed a snapshot, the context tool says so rather than inventing a workspace for
+# the agent to plan against.
+NO_CONTEXT=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>"$ROOT/mcp.err" <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+JSONRPC
+)
+printf '%s' "$NO_CONTEXT" | grep -q 'No workspace context yet. Open Iris on a paired device.'
+printf '%s' "$NO_CONTEXT" | grep -q '"isError":true'
+curl -sk -X PUT -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/context" \
+  -d '{"creatorName":"Chey","pillars":[{"name":"Craft","detail":"How it is made","isAnchor":true,"weekdays":[2,4]}],"platforms":[{"name":"Instagram","formats":["Reel","Carousel"],"weeklyGoal":3}],"series":[],"creatorContext":"Speaks plainly.","updatedAt":"2026-09-16T10:00:00Z"}' | grep -q '"saved":true'
+CONTEXT=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+JSONRPC
+)
+printf '%s' "$CONTEXT" | grep -q 'Craft'
+printf '%s' "$CONTEXT" | grep -q 'anchor'
+printf '%s' "$CONTEXT" | grep -q 'Carousel'
+printf '%s' "$CONTEXT" | grep -q 'Speaks plainly.'
+
+# The MCP server, driven the way Claude Code drives it: newline-delimited JSON-RPC on stdin, one answer per
+# request on stdout, nothing for the notification, and logs kept off stdout entirely.
+MCP_OUT=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>"$ROOT/mcp.err" <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"claude-code","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"iris_submit_post","arguments":{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","hook":"Do this once","note":"Ready for you."}}}
+JSONRPC
+)
+printf '%s' "$MCP_OUT" | grep -q '"protocolVersion":"2025-06-18"'
+printf '%s' "$MCP_OUT" | grep -q 'iris_submit_series'
+printf '%s' "$MCP_OUT" | grep -q 'Sent to Iris for review.'
+LINES=$(printf '%s\n' "$MCP_OUT" | wc -l | tr -d ' ')
+[ "$LINES" = 3 ] || { echo "MCP: expected 3 replies (the notification gets none), got $LINES"; exit 1; }
+# A single stray print on stdout breaks the JSON-RPC stream for the whole session, so every line is checked
+# to be a JSON object rather than the assertions above merely finding what they looked for somewhere in it.
+if printf '%s\n' "$MCP_OUT" | grep -qv '^{'; then echo "MCP: something that is not JSON was written to stdout"; exit 1; fi
+# Submitted over loopback, and visible to this Mac's own admin endpoint straight away.
+ADMIN_INBOX=$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/inbox")
+SUB=$(printf '%s' "$ADMIN_INBOX" | python3 -c 'import json,sys;a=json.load(sys.stdin);print(a[0]["id"] if a else "")')
+test -n "$SUB"
+printf '%s' "$ADMIN_INBOX" | grep -q '"title":"Three shots"'
+# The agent name comes from the MCP client that connected, not from a hard-coded string.
+printf '%s' "$ADMIN_INBOX" | grep -q '"agent":"claude-code"'
+INBOX_CLI=$("$BIN" inbox --root "$ROOT" --port "$PORT")
+printf '%s' "$INBOX_CLI" | grep -q "$SUB"
+printf '%s' "$INBOX_CLI" | grep -q 'Three shots'
+# A revision of something the helper has never seen is refused before it is submitted, so a typo cannot
+# leave a submission in the Inbox pointing at nothing.
+REVISE=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_revise_submission","arguments":{"id":"sub_zzzzzzzzzzzz","post":{"title":"x","pillar":"Craft","platform":"Instagram","format":"Reel"}}}}
+JSONRPC
+)
+printf '%s' "$REVISE" | grep -q 'That submission was not found.'
+printf '%s' "$REVISE" | grep -q '"isError":true'
+"$BIN" inbox clear-decided --root "$ROOT" --port "$PORT" | grep -q 'Removed 0 decided submissions older than 30 days.'
+test "$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/inbox" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = 1
 ID=$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/devices" | python3 -c 'import json,sys;print(json.load(sys.stdin)["devices"][0]["id"])')
 curl -sk -X DELETE -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/devices/$ID" | grep -q revoked
 curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"provider":"claude","message":"x"}' | grep -q '401'

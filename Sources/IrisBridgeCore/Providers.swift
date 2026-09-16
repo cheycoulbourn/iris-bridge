@@ -77,14 +77,14 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
             // Never waitUntilExit() here: a child that traps SIGTERM would hang this thread, and with it the
             // one request the helper allows at a time. Poll to a deadline, then kill.
             Self.escalate(process)
-            // The reader threads finish when the last writer to each pipe goes away, which a killed process
-            // group normally takes care of. If something inherited a write end and outlived the group, the
-            // wait expires and this end of each pipe is closed so the readers cannot block forever.
-            if group.wait(timeout: .now() + 5) == .timedOut {
-                try? stdout.fileHandleForReading.close()
-                try? stderr.fileHandleForReading.close()
-                try? stdin.fileHandleForWriting.close()
-            }
+            // The reader threads finish when the last writer to each pipe goes away, which the killed process
+            // group takes care of. If something inherited a write end and outlived the group, the bounded wait
+            // expires and this thread returns anyway. Closing the read ends here would be worse than waiting:
+            // a reader blocked inside readDataToEndOfFile on a handle closed underneath it raises
+            // NSFileHandleOperationException, which cannot be caught from Swift and would take the helper
+            // down. The stragglers are left alone; they unblock and release the pipes when the last writer
+            // goes, and the Pipe objects die with them.
+            _ = group.wait(timeout: .now() + 5)
             throw BridgeError.timeout
         }
         group.wait()

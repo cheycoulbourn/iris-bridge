@@ -23,20 +23,22 @@ ADMIN=$(cat "$ROOT/admin-token")
 CODE=$(curl -sk -X POST -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/pair-code" | python3 -c 'import json,sys;print(json.load(sys.stdin)["code"])')
 # A pairing code is as good as a pairing until it expires, and the admin and device tokens are as good as
 # the helper itself. None of the three may ever reach a file somebody else can read.
-! grep -qF -- "$CODE" "$ROOT/serve.log"
-! grep -qF -- "$CODE" "$ROOT/logs/bridge.log"
-! grep -qF -- "$ADMIN" "$ROOT/serve.log"
-! grep -qF -- "$ADMIN" "$ROOT/logs/bridge.log"
+# Written as `if grep …; then exit 1; fi` rather than `! grep …`: a pipeline beginning with `!` is exempt
+# from `set -e`, so every negated assertion in this file used to be a no-op that reported nothing.
+if grep -qF -- "$CODE" "$ROOT/serve.log"; then echo "LEAK: pairing code found in serve.log"; exit 1; fi
+if grep -qF -- "$CODE" "$ROOT/logs/bridge.log"; then echo "LEAK: pairing code found in logs/bridge.log"; exit 1; fi
+if grep -qF -- "$ADMIN" "$ROOT/serve.log"; then echo "LEAK: admin token found in serve.log"; exit 1; fi
+if grep -qF -- "$ADMIN" "$ROOT/logs/bridge.log"; then echo "LEAK: admin token found in logs/bridge.log"; exit 1; fi
 # An unauthenticated caller learns the protocol version and whether a provider is ready, and no more: no
 # account email, no plan.
 PUBLIC=$(curl -sk "https://127.0.0.1:$PORT/status")
 printf '%s' "$PUBLIC" | grep -q '"version":2'
-! printf '%s' "$PUBLIC" | grep -q 'stub@example.com'
+if printf '%s' "$PUBLIC" | grep -qF -- 'stub@example.com'; then echo "LEAK: account email found in unauthenticated /status"; exit 1; fi
 PROOF=$(printf '%s' "$FP" | openssl dgst -sha256 -hmac "$CODE" | awk '{print $NF}')
 TOKEN=$(curl -sk -X POST "https://127.0.0.1:$PORT/pair" -d "{\"deviceName\":\"CI\",\"platform\":\"mac\",\"proof\":\"$PROOF\"}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 test -n "$TOKEN"
-! grep -qF -- "$TOKEN" "$ROOT/serve.log"
-! grep -qF -- "$TOKEN" "$ROOT/logs/bridge.log"
+if grep -qF -- "$TOKEN" "$ROOT/serve.log"; then echo "LEAK: device token found in serve.log"; exit 1; fi
+if grep -qF -- "$TOKEN" "$ROOT/logs/bridge.log"; then echo "LEAK: device token found in logs/bridge.log"; exit 1; fi
 # Asserted before any /message call: if the stubs are not the ones answering, the account email will not be
 # the stub's, and the run stops before a prompt reaches a real Claude Code or Codex. The email is in the
 # authenticated answer only, which is also what proves the paired device still gets the full picture.
@@ -52,6 +54,6 @@ ID=$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/d
 curl -sk -X DELETE -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/devices/$ID" | grep -q revoked
 curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"provider":"claude","message":"x"}' | grep -q '401'
 grep -q "paired device" "$ROOT/logs/bridge.log"
-! grep -q "hello" "$ROOT/logs/bridge.log"
-! grep -q "hello" "$ROOT/serve.log"
+if grep -qF -- "hello" "$ROOT/logs/bridge.log"; then echo "LEAK: prompt text found in logs/bridge.log"; exit 1; fi
+if grep -qF -- "hello" "$ROOT/serve.log"; then echo "LEAK: prompt text found in serve.log"; exit 1; fi
 echo "integration: ok"

@@ -3,9 +3,13 @@ import Network
 import Security
 
 public final class BridgeServer: @unchecked Sendable {
-    /// Ceiling on connections the listener will hold at once. `newConnectionLimit` is a budget that the
-    /// framework spends as it delivers connections, so `release` tops it back up as connections close.
-    private static let maximumConnections = 16
+    /// Ceiling on connections from off this Mac. `newConnectionLimit` is a budget the framework spends as it
+    /// delivers connections, so `release` tops it back up as connections close.
+    private static let maximumLANConnections = 16
+    /// What the listener itself will hold at once, across both kinds of peer. It sits well above the LAN cap
+    /// so a network full of half-open connections can never use up the slots `iris-bridge pair`, `status`,
+    /// `devices` and `revoke` need over loopback.
+    private static let listenerBudget = 64
     /// How long a peer may sit on an accepted connection without finishing a request.
     private static let receiveTimeout: TimeInterval = 30
     /// How long the listener may stay in .waiting before `start()` gives up on it.
@@ -14,8 +18,10 @@ public final class BridgeServer: @unchecked Sendable {
     /// Per-connection bookkeeping. Every field is touched only on `queue`, which is serial and is also the
     /// queue the listener, the connection state handler and the receive completions run on.
     private final class ConnectionState {
+        let isLoopback: Bool
         var finished = false
         var released = false
+        init(isLoopback: Bool) { self.isLoopback = isLoopback }
     }
 
     private let listener: NWListener
@@ -26,6 +32,7 @@ public final class BridgeServer: @unchecked Sendable {
     public private(set) var actualPort: UInt16?
     private let requestedPort: UInt16
     private var activeConnections = 0
+    private var lanConnections = 0
 
     public init(port: UInt16, identity: BridgeIdentity, router: Router, serviceName: String, advertise: Bool, log: BridgeLog?) throws {
         self.router = router; self.log = log; self.requestedPort = port
@@ -36,7 +43,7 @@ public final class BridgeServer: @unchecked Sendable {
         let parameters = NWParameters(tls: tls)
         parameters.allowLocalEndpointReuse = true
         listener = try NWListener(using: parameters, on: port == 0 ? .any : NWEndpoint.Port(rawValue: port)!)
-        listener.newConnectionLimit = Self.maximumConnections
+        listener.newConnectionLimit = Self.listenerBudget
         if advertise {
             listener.service = NWListener.Service(name: serviceName, type: "_iris-bridge._tcp", domain: nil,
                                                   txtRecord: NWTXTRecord(["v": "2", "fp": identity.fingerprint, "name": serviceName]))
@@ -117,8 +124,9 @@ public final class BridgeServer: @unchecked Sendable {
     private func accept(_ connection: NWConnection) {
         let parser = HTTPRequestParser()
         let context = Self.context(for: connection)
-        let state = ConnectionState()
+        let state = ConnectionState(isLoopback: context.isLoopback)
         activeConnections += 1
+        if !context.isLoopback { lanConnections += 1 }
         connection.stateUpdateHandler = { [weak self] update in
             switch update {
             case .failed: self?.release(state); connection.cancel()
@@ -127,6 +135,14 @@ public final class BridgeServer: @unchecked Sendable {
             }
         }
         connection.start(queue: queue)
+        // Over the LAN cap: hang up without a reply rather than answer, so a flood from the network cannot
+        // take the slots this Mac's own subcommands need. Loopback is never counted against the cap.
+        if !context.isLoopback, lanConnections > Self.maximumLANConnections {
+            log?.info("refusing connection from \(context.sourceAddress): \(Self.maximumLANConnections) connections from the network already open")
+            state.finished = true
+            connection.cancel()
+            return
+        }
         // Covers the receive phase only. A peer that completes TLS and then says nothing would otherwise pin
         // the connection forever. `finished` is set the moment the request is in hand, so a slow generate is
         // never cut short.
@@ -144,7 +160,8 @@ public final class BridgeServer: @unchecked Sendable {
         state.released = true
         state.finished = true
         activeConnections = max(0, activeConnections - 1)
-        listener.newConnectionLimit = Self.maximumConnections - activeConnections
+        if !state.isLoopback { lanConnections = max(0, lanConnections - 1) }
+        listener.newConnectionLimit = max(0, Self.listenerBudget - activeConnections)
     }
 
     private func receive(_ connection: NWConnection, parser: HTTPRequestParser, context: RequestContext, state: ConnectionState) {
@@ -186,7 +203,14 @@ public final class BridgeServer: @unchecked Sendable {
             @unknown default: break
             }
         }
-        let bare = address.split(separator: "%").first.map(String.init) ?? address
+        return classify(hostDescription: address)
+    }
+
+    /// Splits the interface suffix off a link-local address (`fe80::1%en0`) and decides whether what is left
+    /// is this Mac talking to itself. Only the loopback ranges count: a `.local` name or a private LAN
+    /// address is still somebody else on the network.
+    static func classify(hostDescription: String) -> RequestContext {
+        let bare = hostDescription.split(separator: "%").first.map(String.init) ?? hostDescription
         let loopback = bare.hasPrefix("127.") || bare == "::1" || bare.hasPrefix("::ffff:127.")
         return RequestContext(sourceAddress: bare, isLoopback: loopback)
     }

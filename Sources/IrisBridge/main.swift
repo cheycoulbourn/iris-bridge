@@ -95,17 +95,24 @@ do {
         try LaunchAgent.install(binary: binary)
         print("Iris Bridge will start automatically when you log in.")
     case "uninstall":
-        // Deliberately ignores --root: this deletes a folder tree, and it only ever deletes the one the
-        // installer created.
+        // This deletes a folder tree, and it only ever deletes the one the installer created. Silently
+        // ignoring a --root someone typed would be worse than refusing it: they would think they had
+        // pointed it somewhere else.
+        if line.options["--root"] != nil {
+            refuse("uninstall does not take --root; it only removes the standard Iris Bridge installation.")
+        }
         let installed = BridgePaths.standard
         let home = FileManager.default.homeDirectoryForCurrentUser
         let installedBinary = installed.root.appendingPathComponent("bin/iris-bridge")
-        try LaunchAgent.uninstall()
-        if LaunchAgent.looksLikeBridgeFolder(installed.root) {
-            try? FileManager.default.removeItem(at: installed.root)
-        } else {
-            print("That folder does not look like an Iris Bridge folder; nothing removed.")
+        // The marker check comes before anything destructive, including the launchd bootout. If this is not
+        // our folder we have nothing to uninstall, and stopping a helper we then cannot remove would leave
+        // the machine in a worse state than we found it.
+        guard LaunchAgent.looksLikeBridgeFolder(installed.root) else {
+            complain("The Iris Bridge folder is missing or does not look right; nothing was changed. Expected: \(installed.root.path).")
+            exit(1)
         }
+        try LaunchAgent.uninstall()
+        try? FileManager.default.removeItem(at: installed.root)
         // The convenience symlink, but only while it still points at the copy we just removed. Never
         // argv[0]: that is whatever binary the user happened to run, which may be a build of their own.
         let link = home.appendingPathComponent(".local/bin/iris-bridge")

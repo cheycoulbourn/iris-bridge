@@ -162,7 +162,9 @@ main() {
   "$BIN" install-agent --binary "$BIN"
   STARTED=no
   i=0
-  while [ "$i" -lt 40 ]; do
+  # 80 x 0.25s = 20s. The helper itself waits up to 10s for its listener, so a poll that also stopped at 10s
+  # would call a slow-but-healthy start a failure and bootout the agent.
+  while [ "$i" -lt 80 ]; do
     if "$BIN" status >/dev/null 2>&1; then STARTED=yes; break; fi
     i=$((i + 1)); sleep 0.25
   done

@@ -76,11 +76,16 @@ public final class BridgeServer: @unchecked Sendable {
         }
         // Once the listener is up, failures are asynchronous and would otherwise be silent: the helper would
         // sit there answering nothing. Exit instead so launchd's KeepAlive restarts a healthy copy.
+        // .waiting is not that: a listener that has already served can drop into .waiting when an interface
+        // goes away and come back to .ready by itself, so it gets logged loudly and nothing more. Quitting
+        // on a transient wait would tear down every connection in flight for a problem that fixes itself.
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
-            case .failed(let error), .waiting(let error):
+            case .failed(let error):
                 self?.log?.error("listener failed: \(error)")
                 exit(1)
+            case .waiting(let error):
+                self?.log?.error("listener waiting: \(error)")
             case .cancelled: self?.log?.info("listener cancelled")
             default: break
             }

@@ -181,6 +181,18 @@ final class ProvidersTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
+    func testTimeoutEscalatesToKillForSignalIgnoringChild() {
+        let runner = ForegroundProcessRunner()
+        let started = Date()
+        XCTAssertThrowsError(try runner.run(["/bin/sh", "-c", "trap '' TERM; sleep 30"], input: nil, cwd: nil,
+                                            timeout: 1, requestID: nil)) {
+            XCTAssertEqual($0 as? BridgeError, .timeout)
+        }
+        // 1 s timeout + 3 s grace after SIGTERM + the kill itself. Anything longer means the run waited on a
+        // child that was never going to leave.
+        XCTAssertLessThan(Date().timeIntervalSince(started), 6)
+    }
+
     func testCancelIsThePublicEntryPoint() {
         let runner = ForegroundProcessRunner()
         runner.cancel(requestID: "cancel-2")

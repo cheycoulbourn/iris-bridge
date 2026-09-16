@@ -14,13 +14,27 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
     private var canceled: [String: Date] = [:]
     /// `now` dates the cancellation bookkeeping only; run timeouts always use the wall clock.
     public init(now: @escaping () -> Date = Date.init) { self.now = now }
-    /// Records the request as canceled and signals its process group if it is still running.
+    /// Records the request as canceled and signals its process group if it is still running. A provider that
+    /// ignores SIGTERM is killed rather than left holding the single-request lock; the escalation runs off
+    /// this thread so `cancel` still returns at once and never waits under the lock.
     public func cancel(requestID: String) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         let stamp = now()
         canceled = canceled.filter { stamp.timeIntervalSince($0.value) < 600 }
         canceled[requestID] = stamp
-        if let process = active[requestID], process.isRunning { kill(-process.processIdentifier, SIGTERM) }
+        let process = active[requestID]
+        lock.unlock()
+        guard let process, process.isRunning else { return }
+        kill(-process.processIdentifier, SIGTERM)
+        DispatchQueue.global().async { Self.escalate(process) }
+    }
+
+    /// Gives a signaled process group three seconds to leave on its own, then takes the decision away from
+    /// it. Without this a child that traps SIGTERM keeps the request lock forever.
+    private static func escalate(_ process: Process) {
+        let deadline = Date().addingTimeInterval(3)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
+        if process.isRunning { kill(-process.processIdentifier, SIGKILL) }
     }
     public func markCanceled(_ id: String) { cancel(requestID: id) }
     public func clearCanceled(_ id: String) { lock.lock(); canceled[id] = nil; lock.unlock() }
@@ -58,7 +72,21 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
         }
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
         // Foundation launches the child as its own process-group leader, so the group signal reaches its children too.
-        if process.isRunning { kill(-process.processIdentifier, SIGTERM); process.waitUntilExit(); group.wait(); throw BridgeError.timeout }
+        if process.isRunning {
+            kill(-process.processIdentifier, SIGTERM)
+            // Never waitUntilExit() here: a child that traps SIGTERM would hang this thread, and with it the
+            // one request the helper allows at a time. Poll to a deadline, then kill.
+            Self.escalate(process)
+            // The reader threads finish when the last writer to each pipe goes away, which a killed process
+            // group normally takes care of. If something inherited a write end and outlived the group, the
+            // wait expires and this end of each pipe is closed so the readers cannot block forever.
+            if group.wait(timeout: .now() + 5) == .timedOut {
+                try? stdout.fileHandleForReading.close()
+                try? stderr.fileHandleForReading.close()
+                try? stdin.fileHandleForWriting.close()
+            }
+            throw BridgeError.timeout
+        }
         group.wait()
         if isCanceled(requestID) { throw BridgeError.canceled }
         return ProcessResult(status: process.terminationStatus, stdout: String(data: outData, encoding: .utf8) ?? "", stderr: String(data: errData, encoding: .utf8) ?? "")

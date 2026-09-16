@@ -7,7 +7,12 @@ private final class FakeGenerator: Generator {
     var calls = 0
     var canceled: [String] = []
     func generate(_ request: MessageRequest) throws -> [String: Any] { calls += 1; if let error { throw error }; return reply }
-    func status(_ provider: String) -> ProviderStatus { ProviderStatus(provider: provider, ready: provider == "codex", message: provider == "codex" ? "Signed in with ChatGPT." : "Install Claude Code on your Mac first.") }
+    func status(_ provider: String) -> ProviderStatus {
+        provider == "codex"
+            ? ProviderStatus(provider: provider, ready: true, message: "Signed in with ChatGPT Pro. Your plan limits apply.",
+                             auth: "subscription", account: "chey@example.com", model: "codex-stub")
+            : ProviderStatus(provider: provider, ready: false, message: "Install Claude Code on your Mac first.")
+    }
     func cancel(_ id: String) { canceled.append(id) }
 }
 
@@ -37,8 +42,36 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(status, 200); XCTAssertEqual(body["version"] as? Int, 2); XCTAssertEqual(body["hostName"] as? String, "Studio Mac")
         XCTAssertEqual(body["helperVersion"] as? String, BridgeVersion.current)
         let providers = body["providers"] as? [String: Any]
-        XCTAssertEqual((providers?["codex"] as? [String: Any])?["ready"] as? Bool, true)
-        XCTAssertEqual((providers?["claude"] as? [String: Any])?["ready"] as? Bool, false)
+        let codex = providers?["codex"] as? [String: Any]
+        XCTAssertEqual(codex?["ready"] as? Bool, true)
+        XCTAssertEqual(codex?["model"] as? String, "codex-stub")
+        // Readiness and the model are public; who is signed in and on what plan are not.
+        XCTAssertEqual(codex?["message"] as? String, "Signed in.")
+        XCTAssertNil(codex?["account"]); XCTAssertNil(codex?["auth"])
+        let claude = providers?["claude"] as? [String: Any]
+        XCTAssertEqual(claude?["ready"] as? Bool, false)
+        XCTAssertEqual(claude?["message"] as? String, "Install Claude Code on your Mac first.")
+    }
+    func testStatusHidesAccountUntilAuthenticated() {
+        func codexEntry(_ body: [String: Any]) -> [String: Any] {
+            ((body["providers"] as? [String: Any])?["codex"] as? [String: Any]) ?? [:]
+        }
+        let anonymous = codexEntry(send("GET", "/status").1)
+        XCTAssertNil(anonymous["account"]); XCTAssertNil(anonymous["auth"])
+        XCTAssertEqual(anonymous["message"] as? String, "Signed in.")
+        // A bearer that matches nothing is treated as no bearer at all, not as a reason to refuse /status.
+        let wrongToken = codexEntry(send("GET", "/status", auth: "not-a-token").1)
+        XCTAssertNil(wrongToken["account"])
+        // The admin token is only the admin token when it arrives from this Mac.
+        XCTAssertNil(codexEntry(send("GET", "/status", auth: "admin-secret", loopback: false).1)["account"])
+
+        let paired = send("GET", "/status", auth: token)
+        XCTAssertEqual(paired.0, 200)
+        XCTAssertEqual(codexEntry(paired.1)["account"] as? String, "chey@example.com")
+        XCTAssertEqual(codexEntry(paired.1)["auth"] as? String, "subscription")
+        XCTAssertEqual(codexEntry(paired.1)["message"] as? String, "Signed in with ChatGPT Pro. Your plan limits apply.")
+        // `iris-bridge status` reaches the same detail over loopback with the admin token.
+        XCTAssertEqual(codexEntry(send("GET", "/status", auth: "admin-secret", loopback: true).1)["account"] as? String, "chey@example.com")
     }
     func testOriginHeaderIsRejectedEverywhere() {
         XCTAssertEqual(send("GET", "/status", origin: "https://example.org").0, 403)

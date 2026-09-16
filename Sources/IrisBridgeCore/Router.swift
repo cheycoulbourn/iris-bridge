@@ -29,7 +29,7 @@ public final class Router: @unchecked Sendable {
         if request.header("origin") != nil { return HTTPResponse(status: 403, error: "Browser requests are not allowed.") }
         let bearer = request.header("authorization").flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst(7)) : nil }
         switch (request.method, request.path) {
-        case ("GET", "/status"): return statusResponse()
+        case ("GET", "/status"): return statusResponse(trusted: isTrusted(bearer, context: context))
         case ("POST", "/pair"): return pair(request, context: context)
         case ("POST", "/message"): return authenticated(bearer) { _ in self.message(request) }
         case ("POST", "/cancel"): return authenticated(bearer) { _ in self.cancel(request) }
@@ -49,11 +49,29 @@ public final class Router: @unchecked Sendable {
         return body(device)
     }
 
-    private func statusResponse() -> HTTPResponse {
+    /// `/status` answers anyone, because the connect screen has to read it before it has a token. Only a
+    /// caller we can name gets the full picture: a paired device, or this Mac's own subcommands over
+    /// loopback with the admin token. Everyone else is told whether a provider is ready and nothing about
+    /// whose account it is or what plan is behind it.
+    private func isTrusted(_ bearer: String?, context: RequestContext) -> Bool {
+        guard let bearer else { return false }
+        if devices.authenticate(token: bearer) != nil { return true }
+        return context.isLoopback && PairingProof.constantTimeEqual(bearer, adminToken)
+    }
+
+    private func statusResponse(trusted: Bool) -> HTTPResponse {
         func entry(_ provider: String) -> [String: Any] {
             let s = generator.status(provider)
-            var dict: [String: Any] = ["ready": s.ready, "message": s.message]
-            dict["auth"] = s.auth; dict["account"] = s.account; dict["model"] = s.model
+            var dict: [String: Any] = ["ready": s.ready]
+            dict["model"] = s.model
+            guard trusted else {
+                // The not-ready copy names no account and no plan, so it is safe to repeat verbatim; the
+                // ready copy carries the subscription tier, so it is replaced.
+                dict["message"] = s.ready ? "Signed in." : s.message
+                return dict
+            }
+            dict["message"] = s.message
+            dict["auth"] = s.auth; dict["account"] = s.account
             return dict
         }
         return HTTPResponse(status: 200, json: ["version": BridgeVersion.protocolVersion, "helperVersion": BridgeVersion.current, "hostName": hostName,
@@ -68,7 +86,7 @@ public final class Router: @unchecked Sendable {
         switch pairing.redeem(proof: proof, fingerprint: fingerprint) {
         case .accepted:
             guard let (device, token) = try? devices.issue(name: name, platform: platform) else { return HTTPResponse(status: 500, error: "Could not save the device.") }
-            log?.info("paired device \(device.id) (\(platform))")
+            log?.info("paired device \(device.id) (\(device.platform))")
             return HTTPResponse(status: 200, json: ["deviceID": device.id, "token": token, "hostName": hostName])
         case .wrongCode(let left):
             log?.info("pairing attempt failed from \(context.sourceAddress), \(left) left")

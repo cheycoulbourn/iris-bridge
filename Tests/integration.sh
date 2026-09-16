@@ -21,11 +21,25 @@ for i in $(seq 1 50); do curl -sk "https://127.0.0.1:$PORT/status" >/dev/null 2>
 FP=$(openssl x509 -in "$ROOT/certificate.pem" -outform DER | openssl dgst -sha256 | awk '{print $NF}')
 ADMIN=$(cat "$ROOT/admin-token")
 CODE=$(curl -sk -X POST -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/pair-code" | python3 -c 'import json,sys;print(json.load(sys.stdin)["code"])')
+# A pairing code is as good as a pairing until it expires, and the admin and device tokens are as good as
+# the helper itself. None of the three may ever reach a file somebody else can read.
+! grep -qF -- "$CODE" "$ROOT/serve.log"
+! grep -qF -- "$CODE" "$ROOT/logs/bridge.log"
+! grep -qF -- "$ADMIN" "$ROOT/serve.log"
+! grep -qF -- "$ADMIN" "$ROOT/logs/bridge.log"
+# An unauthenticated caller learns the protocol version and whether a provider is ready, and no more: no
+# account email, no plan.
+PUBLIC=$(curl -sk "https://127.0.0.1:$PORT/status")
+printf '%s' "$PUBLIC" | grep -q '"version":2'
+! printf '%s' "$PUBLIC" | grep -q 'stub@example.com'
 PROOF=$(printf '%s' "$FP" | openssl dgst -sha256 -hmac "$CODE" | awk '{print $NF}')
 TOKEN=$(curl -sk -X POST "https://127.0.0.1:$PORT/pair" -d "{\"deviceName\":\"CI\",\"platform\":\"mac\",\"proof\":\"$PROOF\"}" | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
 test -n "$TOKEN"
+! grep -qF -- "$TOKEN" "$ROOT/serve.log"
+! grep -qF -- "$TOKEN" "$ROOT/logs/bridge.log"
 # Asserted before any /message call: if the stubs are not the ones answering, the account email will not be
-# the stub's, and the run stops before a prompt reaches a real Claude Code or Codex.
+# the stub's, and the run stops before a prompt reaches a real Claude Code or Codex. The email is in the
+# authenticated answer only, which is also what proves the paired device still gets the full picture.
 STATUS=$(curl -sk -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/status")
 printf '%s' "$STATUS" | grep -q '"version":2'
 printf '%s' "$STATUS" | grep -q 'stub@example.com'

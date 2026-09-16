@@ -20,7 +20,11 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     try paths.prepare()
     let log = BridgeLog(file: paths.logFile)
     let identity = try CertificateManager.load(paths: paths)
-    if !FileManager.default.fileExists(atPath: paths.adminToken.path) { try BridgePaths.writePrivate(Data(DeviceStore.randomToken().utf8), to: paths.adminToken) }
+    // A missing file is the first run; a short or blank one is a truncated write, a hand-edited file, or a
+    // half-finished install. Either way it cannot authenticate anything, and accepting it would make
+    // `/admin/*` answer to an empty bearer, so it is replaced rather than read.
+    let storedAdminToken = (try? String(contentsOf: paths.adminToken, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if storedAdminToken.count < 32 { try BridgePaths.writePrivate(Data(DeviceStore.randomToken().utf8), to: paths.adminToken) }
     let adminToken = try String(contentsOf: paths.adminToken, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
     let devices = DeviceStore(file: paths.devices)
     let pairing = PairingCodeStore()
@@ -30,9 +34,18 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     try server.start()
     print("Iris Bridge \(BridgeVersion.current) is running on port \(server.actualPort ?? port).")
     if devices.all.isEmpty {
-        let issued = pairing.issue()
-        print("\nPairing code: \(issued.code)   (valid 10 minutes)\nOpen Iris, choose \"\(HostName.computerName())\" under Macs nearby, and enter the code.\n")
+        // Under launchd, stdout is a log file: a code printed here would sit on disk for anyone who can read
+        // the log, long after it stopped being useful. A code is only issued when a person is watching.
+        if isatty(1) != 0 {
+            let issued = pairing.issue()
+            print("\nPairing code: \(issued.code)   (valid 10 minutes)\nOpen Iris, choose \"\(HostName.computerName())\" under Macs nearby, and enter the code.\n")
+        } else {
+            print("No devices are paired yet. Run `iris-bridge pair` to get a code.")
+        }
     }
+    // Under launchd stdout is a file, so these lines sit in a block buffer until the process exits — which,
+    // for a helper meant to run forever, is never. Flush once here so the log says what happened at startup.
+    fflush(stdout)
     dispatchMain()
 }
 

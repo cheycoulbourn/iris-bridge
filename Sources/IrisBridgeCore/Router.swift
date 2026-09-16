@@ -12,6 +12,8 @@ public protocol Generator {
 public final class Router: @unchecked Sendable {
     private let fingerprint: String, hostName: String, adminToken: String
     private let devices: DeviceStore, pairing: PairingCodeStore, generator: Generator, log: BridgeLog?
+    // Named `contextStore` inside the router because `context` is already the request context every handler takes.
+    private let inbox: InboxStore, contextStore: ContextStore
     private let now: () -> Date
     private let pairLimiter: RateLimiter
     private let lock = NSLock()
@@ -19,16 +21,19 @@ public final class Router: @unchecked Sendable {
     private var running = false
     public var busy: Bool { get { lock.lock(); defer { lock.unlock() }; return running } set { lock.lock(); running = newValue; lock.unlock() } }
 
-    public init(fingerprint: String, hostName: String, adminToken: String, devices: DeviceStore, pairing: PairingCodeStore, generator: Generator, log: BridgeLog?, now: @escaping () -> Date = Date.init) {
+    public init(fingerprint: String, hostName: String, adminToken: String, devices: DeviceStore, pairing: PairingCodeStore,
+                inbox: InboxStore, context contextStore: ContextStore, generator: Generator, log: BridgeLog?,
+                now: @escaping () -> Date = Date.init) {
         self.fingerprint = fingerprint; self.hostName = hostName; self.adminToken = adminToken
         self.devices = devices; self.pairing = pairing; self.generator = generator; self.log = log; self.now = now
+        self.inbox = inbox; self.contextStore = contextStore
         pairLimiter = RateLimiter(limit: 10, per: 60, now: now)
     }
 
     public func handle(_ request: HTTPRequest, context: RequestContext) -> HTTPResponse {
         if request.header("origin") != nil { return HTTPResponse(status: 403, error: "Browser requests are not allowed.") }
         let bearer = request.header("authorization").flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst(7)) : nil }
-        switch (request.method, request.path) {
+        switch (request.method, request.route) {
         case ("GET", "/status"): return statusResponse(trusted: isTrusted(bearer, context: context))
         case ("POST", "/pair"): return pair(request, context: context)
         case ("POST", "/message"): return authenticated(bearer) { _ in self.message(request) }
@@ -36,6 +41,11 @@ public final class Router: @unchecked Sendable {
         case ("DELETE", "/device"): return authenticated(bearer) { device in
             _ = try? self.devices.revoke(id: device.id); self.log?.info("device removed itself \(device.id)")
             return HTTPResponse(status: 200, json: ["removed": true]) }
+        case ("GET", "/inbox"): return authenticated(bearer) { _ in self.inboxList(request) }
+        case ("POST", let route) where route.hasPrefix("/inbox/") && route.hasSuffix("/decision"):
+            let id = String(route.dropFirst("/inbox/".count).dropLast("/decision".count))
+            return authenticated(bearer) { _ in self.decide(request, id: id) }
+        case ("PUT", "/context"): return authenticated(bearer) { _ in self.saveContext(request) }
         case (_, let path) where path.hasPrefix("/admin/"):
             guard context.isLoopback else { return HTTPResponse(status: 404, error: "Not found") }
             guard let bearer, PairingProof.constantTimeEqual(bearer, adminToken) else { return HTTPResponse(status: 401, error: "admin-token") }
@@ -135,7 +145,7 @@ public final class Router: @unchecked Sendable {
     }
 
     private func admin(_ request: HTTPRequest) -> HTTPResponse {
-        switch (request.method, request.path) {
+        switch (request.method, request.route) {
         case ("POST", "/admin/pair-code"):
             let issued = pairing.issue()
             return HTTPResponse(status: 200, json: ["code": issued.code, "expiresAt": ISO8601DateFormatter().string(from: issued.expiresAt)])
@@ -145,7 +155,105 @@ public final class Router: @unchecked Sendable {
         case ("DELETE", let path) where path.hasPrefix("/admin/devices/"):
             let id = String(path.dropFirst("/admin/devices/".count))
             return (try? devices.revoke(id: id)) == true ? HTTPResponse(status: 200, json: ["revoked": id]) : HTTPResponse(status: 404, error: "unknown-device")
+        case ("POST", "/admin/inbox"): return adminSubmit(request)
+        case ("GET", "/admin/inbox"):
+            let all = request.query["status"] == "all"
+            return Self.encoded(200, all ? inbox.all(since: Date(timeIntervalSince1970: 0)) : inbox.pending)
+        case ("GET", "/admin/context"):
+            guard let current = contextStore.current else {
+                return HTTPResponse(status: 404, error: "No workspace context yet. Open Iris on a paired device.")
+            }
+            return Self.encoded(200, current)
         default: return HTTPResponse(status: 404, error: "Not found")
+        }
+    }
+
+    // MARK: - Inbox and context
+
+    private struct InboxPayload: Encodable { var submissions: [Submission]; var now: Date }
+    private struct DecisionBody: Decodable { var status: String; var comment: String? }
+    private struct SubmitBody: Decodable {
+        var kind: SubmissionKind
+        var post: SubmittedPost?
+        var series: SubmittedSeries?
+        var agent: String?
+        var note: String?
+        var revisionOf: String?
+    }
+
+    /// Everything the inbox returns is `Codable`, so it is encoded here rather than hand-built as a
+    /// dictionary. Dates go out as ISO 8601, the shape the app and the stores already agree on.
+    private static func encoded(_ status: Int, _ value: some Encodable) -> HTTPResponse {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(value) else { return HTTPResponse(status: 500, error: "Could not write that reply.") }
+        return HTTPResponse(status: status, data: data)
+    }
+
+    /// ISO 8601 with or without fractional seconds. Anything else is not a date we can act on.
+    private static func parseTimestamp(_ text: String) -> Date? {
+        let withFraction = ISO8601DateFormatter()
+        withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = withFraction.date(from: text) { return date }
+        return ISO8601DateFormatter().date(from: text)
+    }
+
+    private func inboxList(_ request: HTTPRequest) -> HTTPResponse {
+        // A `since` we cannot read is dropped rather than refused: the app is polling, and a stuck clock or a
+        // stale string should cost it a bigger reply, not the Inbox.
+        let since = request.query["since"].flatMap(Self.parseTimestamp)
+        return Self.encoded(200, InboxPayload(submissions: inbox.all(since: since), now: now()))
+    }
+
+    private func decide(_ request: HTTPRequest, id: String) -> HTTPResponse {
+        guard request.body.count < 64 * 1024, let body = try? JSONDecoder().decode(DecisionBody.self, from: request.body) else {
+            return HTTPResponse(status: 400, error: "Could not read that decision.")
+        }
+        guard let status = SubmissionStatus(rawValue: body.status), status != .pending else {
+            return HTTPResponse(status: 400, error: "That is not a decision Iris can record.")
+        }
+        let trimmed = body.comment?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let comment = trimmed.isEmpty ? nil : String(trimmed.prefix(SubmissionLimits.noteCharacters))
+        do {
+            let updated = try inbox.decide(id: id, status: status, comment: comment)
+            log?.info("inbox \(id) \(status.rawValue)")
+            return Self.encoded(200, updated)
+        } catch BridgeError.message("Already decided.") {
+            return HTTPResponse(status: 409, error: "Already decided.")
+        } catch {
+            return HTTPResponse(status: 404, error: "Not found.")
+        }
+    }
+
+    private func saveContext(_ request: HTTPRequest) -> HTTPResponse {
+        guard request.body.count <= 256 * 1024 else {
+            return HTTPResponse(status: 413, error: "That workspace snapshot is too large.")
+        }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        guard let snapshot = try? decoder.decode(WorkspaceContext.self, from: request.body) else {
+            return HTTPResponse(status: 400, error: "Could not read that workspace snapshot.")
+        }
+        do { try contextStore.save(snapshot) } catch {
+            log?.error("could not save workspace context")
+            return HTTPResponse(status: 500, error: "Could not save that workspace snapshot.")
+        }
+        return HTTPResponse(status: 200, json: ["saved": true])
+    }
+
+    private func adminSubmit(_ request: HTTPRequest) -> HTTPResponse {
+        guard let body = try? JSONDecoder().decode(SubmitBody.self, from: request.body) else {
+            return HTTPResponse(status: 400, error: "Could not read that submission.")
+        }
+        do {
+            let submission = try inbox.submit(kind: body.kind, post: body.post, series: body.series,
+                                              agent: body.agent ?? "agent", note: body.note, revisionOf: body.revisionOf)
+            log?.info("inbox received \(submission.kind.rawValue) \(submission.id) from \(submission.agent)")
+            return Self.encoded(200, submission)
+        } catch let error as BridgeError {
+            return HTTPResponse(status: 400, error: error.errorDescription ?? "Could not accept that submission.")
+        } catch {
+            return HTTPResponse(status: 500, error: "Could not save that submission.")
         }
     }
 }

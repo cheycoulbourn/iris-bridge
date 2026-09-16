@@ -28,7 +28,10 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     let adminToken = try String(contentsOf: paths.adminToken, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
     let devices = DeviceStore(file: paths.devices)
     let pairing = PairingCodeStore()
-    let router = Router(fingerprint: identity.fingerprint, hostName: HostName.computerName(), adminToken: adminToken, devices: devices, pairing: pairing, generator: LiveGenerator(), log: log)
+    let inbox = InboxStore(file: paths.inbox)
+    let context = ContextStore(file: paths.context)
+    let router = Router(fingerprint: identity.fingerprint, hostName: HostName.computerName(), adminToken: adminToken, devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: LiveGenerator(), log: log)
     let server = try BridgeServer(port: port, identity: identity, router: router, serviceName: HostName.computerName(), advertise: bonjour, log: log)
     signal(SIGPIPE, SIG_IGN)
     try server.start()

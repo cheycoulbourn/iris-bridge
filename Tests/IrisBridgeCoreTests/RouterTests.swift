@@ -18,6 +18,7 @@ private final class FakeGenerator: Generator {
 
 final class RouterTests: XCTestCase {
     var router: Router!; var devices: DeviceStore!; var pairing: PairingCodeStore!; fileprivate var generator: FakeGenerator!
+    var inbox: InboxStore!; var context: ContextStore!
     let fingerprint = String(repeating: "ab", count: 32)
     var token = ""
     override func setUp() {
@@ -26,16 +27,34 @@ final class RouterTests: XCTestCase {
         devices = DeviceStore(file: dir.appendingPathComponent("devices.json"))
         pairing = PairingCodeStore(generator: { "482913" })
         generator = FakeGenerator()
-        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing, generator: generator, log: nil)
+        inbox = InboxStore(file: dir.appendingPathComponent("inbox.json"))
+        context = ContextStore(file: dir.appendingPathComponent("context.json"))
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: generator, log: nil)
         token = try! devices.issue(name: "Phone", platform: "iphone").token
     }
-    private func send(_ method: String, _ path: String, body: String? = nil, auth: String? = nil, origin: String? = nil, loopback: Bool = false) -> (Int, [String: Any]) {
+    private func raw(_ method: String, _ path: String, body: String? = nil, auth: String? = nil, origin: String? = nil, loopback: Bool = false) -> (Int, Data) {
         var headers: [String: String] = [:]
         if let auth { headers["authorization"] = "Bearer " + auth }
         if let origin { headers["origin"] = origin }
         let request = HTTPRequest(method: method, path: path, headers: headers, body: Data((body ?? "").utf8))
         let response = router.handle(request, context: RequestContext(sourceAddress: loopback ? "127.0.0.1" : "192.168.1.20", isLoopback: loopback))
-        return (response.status, (try? JSONSerialization.jsonObject(with: response.body)) as? [String: Any] ?? [:])
+        return (response.status, response.body)
+    }
+    private func send(_ method: String, _ path: String, body: String? = nil, auth: String? = nil, origin: String? = nil, loopback: Bool = false) -> (Int, [String: Any]) {
+        let (status, data) = raw(method, path, body: body, auth: auth, origin: origin, loopback: loopback)
+        return (status, (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:])
+    }
+    private func sendList(_ method: String, _ path: String, body: String? = nil, auth: String? = nil, loopback: Bool = false) -> (Int, [[String: Any]]) {
+        let (status, data) = raw(method, path, body: body, auth: auth, loopback: loopback)
+        return (status, (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? [])
+    }
+    private let postBody = #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel"}"#
+    @discardableResult
+    private func submit(title: String = "Three shots") -> Submission {
+        try! inbox.submit(kind: .post,
+                          post: SubmittedPost(title: title, pillar: "Craft", platform: "Instagram", format: "Reel"),
+                          series: nil, agent: "claude", note: "Ready for you.", revisionOf: nil)
     }
     func testStatusIsPublicAndReportsProviders() {
         let (status, body) = send("GET", "/status")
@@ -148,5 +167,135 @@ final class RouterTests: XCTestCase {
     }
     func testUnknownPathIs404() {
         XCTAssertEqual(send("GET", "/nope", auth: token).0, 404)
+    }
+
+    // MARK: - Inbox
+
+    func testInboxNeedsADeviceTokenAndListsPending() {
+        submit()
+        XCTAssertEqual(send("GET", "/inbox").0, 401)
+        XCTAssertEqual(send("GET", "/inbox", auth: "admin-secret", loopback: true).0, 401)
+        let (status, body) = send("GET", "/inbox", auth: token)
+        XCTAssertEqual(status, 200)
+        let submissions = body["submissions"] as? [[String: Any]]
+        XCTAssertEqual(submissions?.count, 1)
+        XCTAssertEqual(submissions?.first?["kind"] as? String, "post")
+        XCTAssertEqual(submissions?.first?["status"] as? String, "pending")
+        XCTAssertEqual(submissions?.first?["agent"] as? String, "claude")
+        XCTAssertEqual((submissions?.first?["post"] as? [String: Any])?["title"] as? String, "Three shots")
+        // Dates travel as ISO 8601 strings, and the reply carries the helper's clock so the app can page with `since`.
+        XCTAssertNotNil(ISO8601DateFormatter().date(from: (body["now"] as? String) ?? ""))
+        XCTAssertNotNil(ISO8601DateFormatter().date(from: (submissions?.first?["createdAt"] as? String) ?? ""))
+    }
+
+    func testInboxSinceIsParsedAndAMalformedSinceIsIgnored() {
+        let old = submit(title: "Old one")
+        _ = try! inbox.decide(id: old.id, status: .approved, comment: nil)
+        let future = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3600))
+        let filtered = send("GET", "/inbox?since=" + future, auth: token)
+        XCTAssertEqual((filtered.1["submissions"] as? [[String: Any]])?.count, 0)
+        // A `since` we cannot read is treated as no `since` at all rather than an error.
+        let garbage = send("GET", "/inbox?since=not-a-date", auth: token)
+        XCTAssertEqual(garbage.0, 200)
+        XCTAssertEqual((garbage.1["submissions"] as? [[String: Any]])?.count, 1)
+    }
+
+    func testDecisionApprovesOnceThenConflicts() {
+        let submission = submit()
+        let (status, body) = send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"approved"}"#, auth: token)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(body["status"] as? String, "approved")
+        XCTAssertNotNil(body["decidedAt"])
+        XCTAssertEqual(inbox.pending.count, 0)
+        let again = send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"denied"}"#, auth: token)
+        XCTAssertEqual(again.0, 409)
+        XCTAssertEqual(again.1["error"] as? String, "Already decided.")
+    }
+
+    func testDecisionRejectsUnknownIDsBadStatusAndNoToken() {
+        let submission = submit()
+        XCTAssertEqual(send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"approved"}"#).0, 401)
+        let unknown = send("POST", "/inbox/sub_zzzzzzzzzzzz/decision", body: #"{"status":"approved"}"#, auth: token)
+        XCTAssertEqual(unknown.0, 404)
+        XCTAssertEqual(unknown.1["error"] as? String, "Not found.")
+        XCTAssertEqual(send("POST", "/inbox/not-an-id/decision", body: #"{"status":"approved"}"#, auth: token).0, 404)
+        XCTAssertEqual(send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"maybe"}"#, auth: token).0, 400)
+        XCTAssertEqual(send("POST", "/inbox/\(submission.id)/decision", body: "{}", auth: token).0, 400)
+    }
+
+    func testDecisionKeepsTheComment() {
+        let submission = submit()
+        let long = String(repeating: "x", count: 2_500)
+        let body = try! JSONSerialization.data(withJSONObject: ["status": "changesRequested", "comment": "  " + long + "  "])
+        let (status, reply) = send("POST", "/inbox/\(submission.id)/decision", body: String(data: body, encoding: .utf8), auth: token)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(reply["status"] as? String, "changesRequested")
+        XCTAssertEqual((reply["comment"] as? String)?.count, 2_000)
+    }
+
+    // MARK: - Context
+
+    func testContextRoundTripsFromDeviceToAdmin() {
+        let missing = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(missing.0, 404)
+        XCTAssertEqual(missing.1["error"] as? String, "No workspace context yet. Open Iris on a paired device.")
+
+        let payload = #"{"creatorName":"Chey","pillars":[{"name":"Craft","detail":"How it is made","isAnchor":true,"weekdays":[2]}],"platforms":[{"name":"Instagram","formats":["Reel"],"weeklyGoal":3}],"series":[],"updatedAt":"2026-09-16T10:00:00Z"}"#
+        XCTAssertEqual(send("PUT", "/context", body: payload).0, 401)
+        let saved = send("PUT", "/context", body: payload, auth: token)
+        XCTAssertEqual(saved.0, 200)
+        XCTAssertEqual(saved.1["saved"] as? Bool, true)
+        XCTAssertEqual(context.current?.creatorName, "Chey")
+
+        let read = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(read.0, 200)
+        XCTAssertEqual(read.1["creatorName"] as? String, "Chey")
+        XCTAssertEqual((read.1["pillars"] as? [[String: Any]])?.first?["name"] as? String, "Craft")
+    }
+
+    func testContextRejectsUnreadableAndOversizedBodies() {
+        XCTAssertEqual(send("PUT", "/context", body: "{}", auth: token).0, 400)
+        XCTAssertEqual(send("PUT", "/context", body: "not json", auth: token).0, 400)
+        let filler = String(repeating: "a", count: 260 * 1024)
+        let big = #"{"creatorName":"\#(filler)","pillars":[],"platforms":[],"series":[],"updatedAt":"2026-09-16T10:00:00Z"}"#
+        XCTAssertEqual(send("PUT", "/context", body: big, auth: token).0, 413)
+    }
+
+    // MARK: - Admin inbox
+
+    func testAdminSubmitNeedsLoopbackAndAdminTokenThenValidates() {
+        let body = #"{"kind":"post","agent":"claude","note":"Ready for you.","post":\#(postBody)}"#
+        XCTAssertEqual(send("POST", "/admin/inbox", body: body, auth: "admin-secret", loopback: false).0, 404)
+        XCTAssertEqual(send("POST", "/admin/inbox", body: body, auth: "wrong", loopback: true).0, 401)
+        let (status, reply) = send("POST", "/admin/inbox", body: body, auth: "admin-secret", loopback: true)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(reply["kind"] as? String, "post")
+        XCTAssertEqual(reply["agent"] as? String, "claude")
+        XCTAssertEqual(reply["note"] as? String, "Ready for you.")
+        XCTAssertEqual(reply["status"] as? String, "pending")
+        XCTAssertTrue((reply["id"] as? String)?.hasPrefix("sub_") == true)
+        XCTAssertEqual(inbox.pending.count, 1)
+
+        // Validation failures come back as 400 with the sentence the creator's agent should read.
+        let empty = send("POST", "/admin/inbox", body: #"{"kind":"post","agent":"claude"}"#, auth: "admin-secret", loopback: true)
+        XCTAssertEqual(empty.0, 400)
+        XCTAssertEqual(empty.1["error"] as? String, "Add a post to submit.")
+        let noTitle = #"{"kind":"post","agent":"claude","post":{"title":"  ","pillar":"Craft","platform":"Instagram","format":"Reel"}}"#
+        XCTAssertEqual(send("POST", "/admin/inbox", body: noTitle, auth: "admin-secret", loopback: true).1["error"] as? String, "Give the post a title.")
+        XCTAssertEqual(send("POST", "/admin/inbox", body: "{}", auth: "admin-secret", loopback: true).0, 400)
+    }
+
+    func testAdminInboxListsPendingByDefaultAndAllOnRequest() {
+        let first = submit(title: "First")
+        submit(title: "Second")
+        _ = try! inbox.decide(id: first.id, status: .denied, comment: "Not this week.")
+        let pending = sendList("GET", "/admin/inbox", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(pending.0, 200)
+        XCTAssertEqual(pending.1.count, 1)
+        XCTAssertEqual((pending.1.first?["post"] as? [String: Any])?["title"] as? String, "Second")
+        XCTAssertEqual(sendList("GET", "/admin/inbox?status=pending", auth: "admin-secret", loopback: true).1.count, 1)
+        let all = sendList("GET", "/admin/inbox?status=all", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(all.1.count, 2)
+        XCTAssertEqual(send("GET", "/admin/inbox", auth: token, loopback: false).0, 404)
     }
 }

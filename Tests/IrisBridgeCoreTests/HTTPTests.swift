@@ -17,6 +17,18 @@ final class HTTPTests: XCTestCase {
         guard case .complete(let r) = parser.feed(Data("GET /status HTTP/1.1\r\nHost: x\r\n\r\n".utf8)) else { return XCTFail() }
         XCTAssertEqual(r.method, "GET"); XCTAssertTrue(r.body.isEmpty)
     }
+    func testParsesPutAndSplitsTheQueryFromTheRoute() {
+        let parser = HTTPRequestParser()
+        guard case .complete(let r) = parser.feed(Data("PUT /context HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}".utf8)) else { return XCTFail() }
+        XCTAssertEqual(r.method, "PUT"); XCTAssertEqual(r.route, "/context"); XCTAssertTrue(r.query.isEmpty)
+
+        let query = HTTPRequest(method: "GET", path: "/inbox?since=2026-09-16T10%3A00%3A00Z&status=all&flag&=skip", headers: [:], body: Data())
+        XCTAssertEqual(query.route, "/inbox")
+        XCTAssertEqual(query.query["since"], "2026-09-16T10:00:00Z")
+        XCTAssertEqual(query.query["status"], "all")
+        XCTAssertEqual(query.query["flag"], "")
+        XCTAssertEqual(query.query.count, 3)
+    }
     func testRejectsOversizedBody() {
         let parser = HTTPRequestParser(maxBody: 10)
         guard case .tooLarge = parser.feed(Data("POST /m HTTP/1.1\r\nContent-Length: 11\r\n\r\n".utf8)) else { return XCTFail() }

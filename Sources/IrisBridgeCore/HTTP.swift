@@ -6,6 +6,32 @@ public struct HTTPRequest {
     public var headers: [String: String]
     public var body: Data
     public func header(_ name: String) -> String? { headers[name.lowercased()] }
+
+    /// `path` is the raw request target, query string and all. `route` is the part the router matches on.
+    public var route: String {
+        guard let mark = path.firstIndex(of: "?") else { return path }
+        return String(path[..<mark])
+    }
+
+    /// The query string as name/value pairs, percent-decoded. A repeated name keeps the last value, and a
+    /// name with no `=` reads as an empty string. Nothing here can fail: a query we cannot make sense of
+    /// simply contributes nothing.
+    public var query: [String: String] {
+        guard let mark = path.firstIndex(of: "?") else { return [:] }
+        var result: [String: String] = [:]
+        for pair in path[path.index(after: mark)...].split(separator: "&") {
+            let parts = pair.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            let name = Self.decode(String(parts[0]))
+            guard !name.isEmpty else { continue }
+            result[name] = parts.count > 1 ? Self.decode(String(parts[1])) : ""
+        }
+        return result
+    }
+
+    private static func decode(_ text: String) -> String {
+        let spaced = text.replacingOccurrences(of: "+", with: " ")
+        return spaced.removingPercentEncoding ?? spaced
+    }
 }
 
 public final class HTTPRequestParser {
@@ -33,7 +59,7 @@ public final class HTTPRequestParser {
             var lines = head.components(separatedBy: "\r\n")
             let requestLine = lines.removeFirst().split(separator: " ", omittingEmptySubsequences: true)
             guard requestLine.count == 3, requestLine[2].hasPrefix("HTTP/1."),
-                  ["GET", "POST", "DELETE"].contains(String(requestLine[0])), requestLine[1].hasPrefix("/") else { return .invalid("Bad request line") }
+                  ["GET", "POST", "PUT", "DELETE"].contains(String(requestLine[0])), requestLine[1].hasPrefix("/") else { return .invalid("Bad request line") }
             var parsedHeaders: [String: String] = [:]
             for line in lines where !line.isEmpty {
                 guard let colon = line.firstIndex(of: ":") else { return .invalid("Bad header") }

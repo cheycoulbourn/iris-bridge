@@ -216,6 +216,23 @@ final class SubmissionsTests: XCTestCase {
         XCTAssertEqual(missing.localizedDescription, "Not found.")
     }
 
+    /// A decision that could not be written must not linger in memory: the app would be told the save failed
+    /// while this process went on answering "approved" for it, and the next restart — reading the file — would
+    /// disagree with everything the running helper had said.
+    func testADecisionThatCannotBeSavedLeavesMemoryAsItWas() throws {
+        let directory = makeDirectory()
+        let store = InboxStore(file: directory.appendingPathComponent("inbox.json"))
+        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        // Nothing can be written from here on: the folder the file lives in is gone.
+        try FileManager.default.removeItem(at: directory)
+        XCTAssertThrowsError(try store.decide(id: submission.id, status: .approved, comment: "Looks good"))
+        let waiting = store.pending
+        XCTAssertEqual(waiting.map(\.id), [submission.id], "it is still pending")
+        XCTAssertEqual(waiting.first?.status, .pending)
+        XCTAssertNil(waiting.first?.comment)
+        XCTAssertNil(waiting.first?.decidedAt)
+    }
+
     // MARK: all(since:)
 
     func testAllSinceFiltersAndSortsNewestFirst() throws {

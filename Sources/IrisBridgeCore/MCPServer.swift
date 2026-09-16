@@ -65,7 +65,17 @@ public final class StdioMCPTransport: MCPTransport {
 /// always looking at the same inbox.
 public struct MCPServer {
     public static let protocolVersion = "2025-06-18"
+    /// Newest first. Both revisions describe the same five tools over the same stdio framing, so a client
+    /// pinned to the older one is answered in the version it asked for rather than told to speak a newer one.
+    public static let protocolVersions = ["2025-06-18", "2024-11-05"]
     public static let notRunning = "Iris Bridge is not running. Run `iris-bridge status` on this Mac."
+
+    /// Called by `iris-bridge mcp` before the first byte is read. The client owns stdout, and a client that
+    /// closes it before the last reply is written would otherwise kill this process with SIGPIPE in the middle
+    /// of a sentence. Ignored, that write fails like any other and the read loop ends at EOF instead.
+    public static func ignoreBrokenPipe() {
+        signal(SIGPIPE, SIG_IGN)
+    }
 
     /// The client that connected, remembered from `initialize` so a submission says who sent it. A reference
     /// box because `handle` answers one message at a time and must not need a `var` server to do it.
@@ -99,7 +109,7 @@ public struct MCPServer {
         switch method {
         case "initialize":
             rememberClient(params)
-            return reply(id, ["protocolVersion": Self.protocolVersion,
+            return reply(id, ["protocolVersion": Self.negotiated(params["protocolVersion"]),
                               "capabilities": ["tools": [String: Any]()],
                               "serverInfo": ["name": "iris-bridge", "version": version]])
         case "ping":
@@ -120,6 +130,13 @@ public struct MCPServer {
         while let message = try transport.readMessage() {
             if let answer = handle(message) { try transport.writeMessage(answer) }
         }
+    }
+
+    /// The version to answer `initialize` with: the client's own when it is one this server speaks, and this
+    /// server's newest otherwise — which is how MCP says a server tells a client "not that one, this one".
+    static func negotiated(_ requested: Any?) -> String {
+        guard let asked = requested as? String, protocolVersions.contains(asked) else { return protocolVersion }
+        return asked
     }
 
     private func rememberClient(_ params: [String: Any]?) {
@@ -237,11 +254,11 @@ public struct MCPServer {
             case "iris_get_workspace_context":
                 return Self.text(Self.describe(try client.context()))
             case "iris_submit_post":
-                let submission = try client.submit(kind: .post, post: Self.post(from: arguments), series: nil,
+                let submission = try client.submit(kind: .post, post: try Self.post(from: arguments), series: nil,
                                                    agent: state.agent, note: Self.string(arguments["note"]), revisionOf: nil)
                 return Self.text("Sent to Iris for review. (id: \(submission.id))")
             case "iris_submit_series":
-                let submission = try client.submit(kind: .series, post: nil, series: Self.series(from: arguments),
+                let submission = try client.submit(kind: .series, post: nil, series: try Self.series(from: arguments),
                                                    agent: state.agent, note: Self.string(arguments["note"]), revisionOf: nil)
                 return Self.text("Sent to Iris for review. (id: \(submission.id))")
             case "iris_list_submissions":
@@ -266,12 +283,17 @@ public struct MCPServer {
         let post = arguments["post"] as? [String: Any]
         let series = arguments["series"] as? [String: Any]
         guard post != nil || series != nil else { return Self.failure("Add a post or a series to the revision.") }
+        // Both at once used to be sent as a post that also carried a series, and the series went in without
+        // ever being measured: the length check runs on whichever side the kind names. A revision is one
+        // thing being replaced by one thing, so the agent is asked which — before any round trip.
+        guard post == nil || series == nil else { return Self.failure("Send either a post or a series, not both.") }
         guard try client.listSubmissions(status: "all").contains(where: { $0.id == id }) else {
             return Self.failure("That submission was not found.")
         }
-        let submission = try client.submit(kind: post != nil ? .post : .series,
-                                           post: post.map(Self.post(from:)),
-                                           series: series.map(Self.series(from:)),
+        let kind: SubmissionKind = post != nil ? .post : .series
+        let submission = try client.submit(kind: kind,
+                                           post: kind == .post ? try Self.post(from: post ?? [:]) : nil,
+                                           series: kind == .series ? try Self.series(from: series ?? [:]) : nil,
                                            agent: state.agent, note: Self.string(arguments["note"]), revisionOf: id)
         return Self.text("Sent to Iris for review. (id: \(submission.id))")
     }
@@ -306,26 +328,52 @@ public struct MCPServer {
     /// of the same mistake.
     private static func required(_ any: Any?) -> String { (any as? String) ?? "" }
 
-    static func post(from arguments: [String: Any]) -> SubmittedPost {
+    /// An optional whole number. A model that writes `"episode": "3"` is told so rather than having it
+    /// dropped: a post that quietly lost its episode number lands in the Inbox belonging to no slot, and
+    /// neither the agent nor the creator can see where it went.
+    private static func integer(_ any: Any?, _ sentence: String) throws -> Int? {
+        guard let any, !(any is NSNull) else { return nil }
+        guard let number = any as? NSNumber, !isBoolean(any) else { throw BridgeError.message(sentence) }
+        return number.intValue
+    }
+
+    /// JSON `true` bridges to `NSNumber` like any other number, and `true` is not an episode.
+    private static func isBoolean(_ value: Any) -> Bool {
+        CFGetTypeID(value as CFTypeRef) == CFBooleanGetTypeID()
+    }
+
+    static func post(from arguments: [String: Any]) throws -> SubmittedPost {
         SubmittedPost(title: required(arguments["title"]), pillar: required(arguments["pillar"]),
                       platform: required(arguments["platform"]), format: required(arguments["format"]),
                       postingDate: string(arguments["postingDate"]), hook: string(arguments["hook"]),
-                      script: string(arguments["script"]), scenes: scenes(arguments["scenes"]),
+                      script: string(arguments["script"]), scenes: try scenes(arguments["scenes"]),
                       caption: string(arguments["caption"]), cta: string(arguments["cta"]),
                       notes: string(arguments["notes"]), seriesName: string(arguments["seriesName"]),
-                      episode: (arguments["episode"] as? NSNumber)?.intValue)
+                      episode: try integer(arguments["episode"], "Give episode as a number."))
     }
 
-    private static func scenes(_ any: Any?) -> [SubmittedScene]? {
-        guard let raw = any as? [[String: Any]] else { return nil }
-        return raw.map { SubmittedScene(script: required($0["script"]), shotNotes: required($0["shotNotes"])) }
+    private static let sceneSentence = "Each scene needs script and shotNotes text."
+
+    /// Scenes written as bare strings, or missing half of themselves, used to fail one cast and disappear:
+    /// the post arrived with no scenes at all and nothing said why.
+    private static func scenes(_ any: Any?) throws -> [SubmittedScene]? {
+        guard let any, !(any is NSNull) else { return nil }
+        guard let elements = any as? [Any] else { throw BridgeError.message(sceneSentence) }
+        return try elements.map { element in
+            guard let scene = element as? [String: Any],
+                  let script = scene["script"] as? String,
+                  let shotNotes = scene["shotNotes"] as? String else {
+                throw BridgeError.message(sceneSentence)
+            }
+            return SubmittedScene(script: script, shotNotes: shotNotes)
+        }
     }
 
-    static func series(from arguments: [String: Any]) -> SubmittedSeries {
-        let episodes = (arguments["episodes"] as? [[String: Any]] ?? []).enumerated().map { index, raw in
+    static func series(from arguments: [String: Any]) throws -> SubmittedSeries {
+        let episodes = try (arguments["episodes"] as? [[String: Any]] ?? []).enumerated().map { index, raw in
             SubmittedEpisode(number: (raw["number"] as? NSNumber)?.intValue ?? index + 1,
                              date: string(raw["date"]),
-                             post: post(from: raw["post"] as? [String: Any] ?? [:]))
+                             post: try post(from: raw["post"] as? [String: Any] ?? [:]))
         }
         return SubmittedSeries(name: required(arguments["name"]), pillar: required(arguments["pillar"]),
                                summary: string(arguments["summary"]), episodes: episodes)
@@ -335,9 +383,14 @@ public struct MCPServer {
 
     static func list(_ submissions: [Submission]) -> String {
         guard !submissions.isEmpty else { return "Nothing has been sent yet." }
+        // One submission, one line. Titles and comments are written elsewhere — by the agent, or by the
+        // creator on a phone — so they are flattened before they are printed: see `OneLineText`.
         return submissions.map { submission in
-            var line = "\(submission.id) · \(submission.kind.rawValue) · \(submission.displayTitle) · \(submission.status.rawValue)"
-            if let comment = string(submission.comment) { line += " · \(comment)" }
+            var line = "\(submission.id) · \(submission.kind.rawValue) · \(submission.listTitle) · \(submission.status.rawValue)"
+            if let raw = string(submission.comment) {
+                let comment = OneLineText.clean(raw)
+                if !comment.isEmpty { line += " · \(comment)" }
+            }
             return line
         }.joined(separator: "\n")
     }

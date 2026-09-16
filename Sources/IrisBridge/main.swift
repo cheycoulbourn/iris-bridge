@@ -117,12 +117,17 @@ do {
             }
             let now = Date()
             for submission in waiting {
-                print("\(submission.id)  \(submission.kind.rawValue)  \(submission.displayTitle)  \(submission.ageText(now: now))")
+                // `listTitle`, not `displayTitle`: an agent wrote that title, and a newline or an escape
+                // sequence in it would print as several rows, or repaint the Terminal.
+                print("\(submission.id)  \(submission.kind.rawValue)  \(submission.listTitle)  \(submission.ageText(now: now))")
             }
         }
     case "mcp":
         // stdout belongs to JSON-RPC from here on. Nothing else may print to it, which is why this branch
-        // has no `print` of its own and the server writes through the transport.
+        // has no `print` of its own and the server writes through the transport. And because the client owns
+        // the other end of that pipe, a client that closes it early must end this process at EOF rather than
+        // kill it with SIGPIPE part-way through a reply.
+        MCPServer.ignoreBrokenPipe()
         let server = MCPServer(client: LoopbackAdminClient(paths: paths, port: port), version: BridgeVersion.current)
         try server.run(transport: StdioMCPTransport())
     case "install-agent":

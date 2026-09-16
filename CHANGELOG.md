@@ -14,6 +14,9 @@
 - `iris-bridge inbox` lists what is waiting, with how long it has been waiting; `iris-bridge inbox
   clear-decided` forgets decided submissions older than 30 days. The helper also prunes them at startup, so
   the file the app downloads does not grow forever.
+- Arguments an agent got wrong are said out loud rather than dropped: an episode that is not a number, a
+  scene that is not a scene, a revision carrying both a post and a series (which used to walk the series past
+  the length cap). Listed titles and comments are flattened onto one line, escape sequences and all.
 - The installer ends with the line that registers the tools in Claude Code.
 
 The protocol version stays 2: every endpoint here is additive. The app's minimum helper version for Inbox

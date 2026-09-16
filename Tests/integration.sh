@@ -96,6 +96,25 @@ printf '%s' "$ADMIN_INBOX" | grep -q '"agent":"claude-code"'
 INBOX_CLI=$("$BIN" inbox --root "$ROOT" --port "$PORT")
 printf '%s' "$INBOX_CLI" | grep -q "$SUB"
 printf '%s' "$INBOX_CLI" | grep -q 'Three shots'
+# Titles are written by an agent. One with a newline and a colour escape in it still prints as a single row:
+# a wrapped title would look like submissions nobody sent, and the escape would repaint the Terminal.
+NOISY=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_submit_post","arguments":{"title":"Two\nlines\u001b[31m here","pillar":"Craft","platform":"Instagram","format":"Reel"}}}
+JSONRPC
+)
+printf '%s' "$NOISY" | grep -q 'Sent to Iris for review.'
+NOISY_CLI=$("$BIN" inbox --root "$ROOT" --port "$PORT")
+NOISY_LINES=$(printf '%s\n' "$NOISY_CLI" | wc -l | tr -d ' ')
+[ "$NOISY_LINES" = 2 ] || { echo "inbox: expected one line per submission, got $NOISY_LINES"; exit 1; }
+printf '%s' "$NOISY_CLI" | grep -q 'Two lines here'
+# A revision cannot carry a post and a series at once: the kind decides which side is length-checked, so
+# sending both walked the unchecked one straight past the 24,000-character cap.
+BOTH=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<JSONRPC
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_revise_submission","arguments":{"id":"$SUB","post":{"title":"x","pillar":"Craft","platform":"Instagram","format":"Reel"},"series":{"name":"s","pillar":"Craft","episodes":[{"number":1,"post":{"title":"y","pillar":"Craft","platform":"Instagram","format":"Reel"}}]}}}}
+JSONRPC
+)
+printf '%s' "$BOTH" | grep -q 'Send either a post or a series, not both.'
+printf '%s' "$BOTH" | grep -q '"isError":true'
 # A revision of something the helper has never seen is refused before it is submitted, so a typo cannot
 # leave a submission in the Inbox pointing at nothing.
 REVISE=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
@@ -105,7 +124,7 @@ JSONRPC
 printf '%s' "$REVISE" | grep -q 'That submission was not found.'
 printf '%s' "$REVISE" | grep -q '"isError":true'
 "$BIN" inbox clear-decided --root "$ROOT" --port "$PORT" | grep -q 'Removed 0 decided submissions older than 30 days.'
-test "$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/inbox" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = 1
+test "$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/inbox" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = 2
 ID=$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/devices" | python3 -c 'import json,sys;print(json.load(sys.stdin)["devices"][0]["id"])')
 curl -sk -X DELETE -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/devices/$ID" | grep -q revoked
 curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"provider":"claude","message":"x"}' | grep -q '401'

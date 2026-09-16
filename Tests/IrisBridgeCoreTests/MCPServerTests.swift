@@ -87,6 +87,36 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(info?["version"] as? String, "0.2.0")
     }
 
+    /// MCP negotiation: the reply names a version the server actually speaks. The client's own is echoed when
+    /// it is one of them, so a client pinned to the older revision is not told to speak one it cannot.
+    func testInitializeEchoesAProtocolVersionTheServerAlsoSpeaks() {
+        let result = self.result(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","clientInfo":{"name":"claude-code"}}}"#)
+        XCTAssertEqual(result["protocolVersion"] as? String, "2024-11-05")
+    }
+
+    func testAProtocolVersionTheServerDoesNotSpeakGetsTheOneItDoes() {
+        XCTAssertEqual(result(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#)["protocolVersion"] as? String,
+                       "2025-06-18")
+        XCTAssertEqual(result(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":7}}"#)["protocolVersion"] as? String,
+                       "2025-06-18")
+        XCTAssertEqual(result(#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#)["protocolVersion"] as? String,
+                       "2025-06-18")
+    }
+
+    /// `iris-bridge mcp` hands stdout to the client. A client that closes it before the last reply is written
+    /// would kill the process with SIGPIPE mid-sentence; ignored, the read loop ends at EOF instead.
+    func testTheServerIgnoresBrokenPipesSoAClosedStdoutEndsAtEOF() {
+        // Signal handlers are function pointers, which are not Equatable; compared as raw addresses instead.
+        func address(_ handler: sig_t?) -> UnsafeRawPointer? { unsafeBitCast(handler, to: UnsafeRawPointer?.self) }
+        // Put SIGPIPE back to its default first, so this cannot pass on a disposition something else set.
+        let original = signal(SIGPIPE, SIG_DFL)
+        let afterwards = { () -> sig_t? in
+            MCPServer.ignoreBrokenPipe()
+            return signal(SIGPIPE, original ?? SIG_DFL)   // reads what it set, and restores what was there
+        }()
+        XCTAssertEqual(address(afterwards), address(SIG_IGN), "SIGPIPE was left at its default disposition")
+    }
+
     func testPingAnswersWithAnEmptyResult() {
         XCTAssertTrue(result(#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#).isEmpty)
     }
@@ -191,6 +221,52 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(text, "Iris Bridge is not running. Run `iris-bridge status` on this Mac.")
     }
 
+    // MARK: - Arguments the agent got wrong
+
+    /// A model that writes `"episode": "3"` gets told so. Dropping it silently sent a post to a series slot
+    /// with no episode number on it, and neither the agent nor the creator could see where it went.
+    func testAnEpisodeGivenAsAStringIsRefusedWithAPlainSentence() {
+        let (text, isError) = call("iris_submit_post", #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","episode":"3"}"#)
+        XCTAssertTrue(isError)
+        XCTAssertEqual(text, "Give episode as a number.")
+        XCTAssertNil(client.lastSubmit, "nothing may reach the helper")
+    }
+
+    func testAnEpisodeGivenAsABooleanIsRefusedToo() {
+        let (text, isError) = call("iris_submit_post", #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","episode":true}"#)
+        XCTAssertTrue(isError)
+        XCTAssertEqual(text, "Give episode as a number.")
+    }
+
+    func testAnEpisodeGivenAsANumberStillArrives() {
+        let (_, isError) = call("iris_submit_post", #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","episode":3}"#)
+        XCTAssertFalse(isError)
+        XCTAssertEqual(client.lastSubmit?.post?.episode, 3)
+    }
+
+    /// Scenes written as bare strings used to fail the array cast and vanish, so the post arrived with no
+    /// scenes at all and the agent had no idea why.
+    func testScenesThatAreNotSceneObjectsAreRefused() {
+        let (text, isError) = call("iris_submit_post", #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","scenes":["open wide","then close"]}"#)
+        XCTAssertTrue(isError)
+        XCTAssertEqual(text, "Each scene needs script and shotNotes text.")
+        XCTAssertNil(client.lastSubmit, "nothing may reach the helper")
+    }
+
+    func testASceneMissingItsShotNotesIsRefusedRatherThanQuietlyEmptied() {
+        let (text, isError) = call("iris_submit_post", #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","scenes":[{"script":"open"}]}"#)
+        XCTAssertTrue(isError)
+        XCTAssertEqual(text, "Each scene needs script and shotNotes text.")
+    }
+
+    func testABadSceneInsideASeriesEpisodeIsCaughtTheSameWay() {
+        let arguments = #"{"name":"Quiet mornings","pillar":"Craft","episodes":[{"number":1,"post":{"title":"One","pillar":"Craft","platform":"Instagram","format":"Reel","scenes":[7]}}]}"#
+        let (text, isError) = call("iris_submit_series", arguments)
+        XCTAssertTrue(isError)
+        XCTAssertEqual(text, "Each scene needs script and shotNotes text.")
+        XCTAssertNil(client.lastSubmit)
+    }
+
     func testAnUnknownToolIsAToolErrorNotAProtocolError() {
         let (text, isError) = call("iris_publish_everywhere")
         XCTAssertTrue(isError)
@@ -233,6 +309,40 @@ final class MCPServerTests: XCTestCase {
         XCTAssertFalse(isError)
         XCTAssertEqual(text, "Nothing has been sent yet.")
         XCTAssertEqual(client.listedStatuses, ["pending"])
+    }
+
+    /// Titles and comments are agent-written text on a line the creator reads in Terminal. A newline in one
+    /// would break the list into rows that are not submissions, and an escape sequence would recolour the
+    /// rest of the session.
+    func testListedTitlesAndCommentsAreFlattenedOntoOneLine() {
+        client.stored = [Submission(id: "sub_aaaaaaaaaaaa", kind: .post,
+                                    post: SubmittedPost(title: "Three\nshots\u{1B}[31m  in\tone\u{07}",
+                                                        pillar: "Craft", platform: "Instagram", format: "Reel"),
+                                    agent: "claude", status: .changesRequested,
+                                    comment: "tighten\r\nthe hook", createdAt: Date())]
+        let (text, isError) = call("iris_list_submissions", #"{"status":"all"}"#)
+        XCTAssertFalse(isError)
+        XCTAssertEqual(text, "sub_aaaaaaaaaaaa · post · Three shots in one · changesRequested · tighten the hook")
+    }
+
+    func testALongTitleIsCutToEightyCharactersWithAnEllipsis() {
+        let submission = Submission(id: "sub_aaaaaaaaaaaa", kind: .post,
+                                    post: SubmittedPost(title: String(repeating: "a", count: 200),
+                                                        pillar: "Craft", platform: "Instagram", format: "Reel"),
+                                    agent: "claude", createdAt: Date())
+        XCTAssertEqual(submission.listTitle.count, 80)
+        XCTAssertTrue(submission.listTitle.hasSuffix("…"), submission.listTitle)
+        client.stored = [submission]
+        let (text, _) = call("iris_list_submissions", #"{"status":"all"}"#)
+        XCTAssertTrue(text.contains(submission.listTitle), text)
+        XCTAssertEqual(text.split(separator: "\n").count, 1)
+    }
+
+    func testAShortPlainTitleIsLeftExactlyAsItIs() {
+        XCTAssertEqual(OneLineText.clean("Three shots", limit: 80), "Three shots")
+        XCTAssertEqual(OneLineText.clean("  spaced out  ", limit: 80), "spaced out")
+        XCTAssertEqual(OneLineText.clean("\u{1B}]0;title\u{07}after", limit: 80), "after")
+        XCTAssertEqual(OneLineText.clean(String(repeating: "b", count: 80), limit: 80).count, 80)
     }
 
     // MARK: - Context
@@ -295,6 +405,34 @@ final class MCPServerTests: XCTestCase {
         let (text, isError) = call("iris_revise_submission", #"{"id":"sub_aaaaaaaaaaaa"}"#)
         XCTAssertTrue(isError)
         XCTAssertEqual(text, "Add a post or a series to the revision.")
+    }
+
+    /// Both at once used to be submitted as a post carrying a series, which walked the series straight past
+    /// the 24,000-character check — the only thing standing between a runaway plan and the Inbox.
+    func testARevisionCannotCarryAPostAndASeriesAtOnce() {
+        client.stored = [Submission(id: "sub_aaaaaaaaaaaa", kind: .post, agent: "claude", createdAt: Date())]
+        let series = #"{"name":"Quiet mornings","pillar":"Craft","episodes":[{"number":1,"post":\#(samplePost)}]}"#
+        let (text, isError) = call("iris_revise_submission", #"{"id":"sub_aaaaaaaaaaaa","post":\#(samplePost),"series":\#(series)}"#)
+        XCTAssertTrue(isError)
+        XCTAssertEqual(text, "Send either a post or a series, not both.")
+        XCTAssertNil(client.lastSubmit, "nothing may reach the helper")
+        XCTAssertTrue(client.listedStatuses.isEmpty, "and it is refused without a round trip")
+    }
+
+    func testAPostRevisionCarriesNoSeriesAndASeriesRevisionCarriesNoPost() {
+        client.stored = [Submission(id: "sub_aaaaaaaaaaaa", kind: .post, agent: "claude", createdAt: Date())]
+        let (postText, postIsError) = call("iris_revise_submission", #"{"id":"sub_aaaaaaaaaaaa","post":\#(samplePost)}"#)
+        XCTAssertFalse(postIsError, postText)
+        XCTAssertEqual(client.lastSubmit?.kind, .post)
+        XCTAssertNotNil(client.lastSubmit?.post)
+        XCTAssertNil(client.lastSubmit?.series)
+
+        let series = #"{"name":"Quiet mornings","pillar":"Craft","episodes":[{"number":1,"post":\#(samplePost)}]}"#
+        let (seriesText, seriesIsError) = call("iris_revise_submission", #"{"id":"sub_aaaaaaaaaaaa","series":\#(series)}"#)
+        XCTAssertFalse(seriesIsError, seriesText)
+        XCTAssertEqual(client.lastSubmit?.kind, .series)
+        XCTAssertNil(client.lastSubmit?.post)
+        XCTAssertEqual(client.lastSubmit?.series?.name, "Quiet mornings")
     }
 
     // MARK: - Transport

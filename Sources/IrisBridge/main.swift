@@ -1,6 +1,19 @@
 import Foundation
 import IrisBridgeCore
 
+let usage = "Usage: iris-bridge [serve|pair|status|devices|revoke <id>|install-agent --binary <path>|uninstall|version]"
+
+func complain(_ message: String) {
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
+/// Everything a user typed wrong exits 2 with the reason on stderr, so a script can tell "you asked wrong"
+/// (2) from "the helper could not do it" (1).
+func refuse(_ message: String) -> Never {
+    complain(message)
+    exit(2)
+}
+
 func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     var paths = BridgePaths.standard
     if let root { let url = URL(fileURLWithPath: root); paths = BridgePaths(root: url, logs: url.appendingPathComponent("logs")) }
@@ -23,18 +36,37 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     dispatchMain()
 }
 
-var args = Array(CommandLine.arguments.dropFirst())
-let command = args.isEmpty ? "serve" : args.removeFirst()
-func option(_ name: String) -> String? { guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }; return args[i + 1] }
-let port = UInt16(option("--port") ?? "48731") ?? 48731
-var paths = BridgePaths.standard
-if let root = option("--root") { let url = URL(fileURLWithPath: root); paths = BridgePaths(root: url, logs: url.appendingPathComponent("logs")) }
+/// A pairing code is read off the screen and typed into a phone, so it gets room of its own and a spaced-out
+/// copy: six digits in a row are easy to misread in a wall of Terminal text.
+func printPairingCode(_ code: String) {
+    let spaced = code.map(String.init).joined(separator: " ")
+    print("")
+    print("  Pairing code:  \(code)")
+    print("                 \(spaced)")
+    print("")
+    print("  Open Iris, choose \"\(HostName.computerName())\" under Macs nearby, and enter this code.")
+    print("  It expires in 10 minutes. Run `iris-bridge pair` for a new one.")
+    print("")
+}
+
+let line: BridgeCommandLine
+let port: UInt16
 do {
-    switch command {
-    case "serve": try serve(root: option("--root"), port: port, bonjour: !args.contains("--no-bonjour"))
+    line = try BridgeCommandLine.parse(Array(CommandLine.arguments.dropFirst()))
+    port = try line.port(default: 48731)
+} catch {
+    refuse(error.localizedDescription)
+}
+
+var paths = BridgePaths.standard
+if let root = line.options["--root"] { let url = URL(fileURLWithPath: root); paths = BridgePaths(root: url, logs: url.appendingPathComponent("logs")) }
+
+do {
+    switch line.command {
+    case "serve":
+        try serve(root: line.options["--root"], port: port, bonjour: !line.flags.contains("--no-bonjour"))
     case "pair":
-        let issued = try AdminClient(paths: paths, port: port).pairCode()
-        print("\n  Pairing code:  \(issued.code)\n\n  Open Iris, choose \"\(HostName.computerName())\" under Macs nearby, and enter this code.\n  It expires in 10 minutes. Run `iris-bridge pair` for a new one.\n")
+        printPairingCode(try AdminClient(paths: paths, port: port).pairCode().code)
     case "status":
         let s = try AdminClient(paths: paths, port: port).status()
         let providers = s["providers"] as? [String: [String: Any]] ?? [:]
@@ -46,17 +78,54 @@ do {
         if list.isEmpty { print("No paired devices. Run `iris-bridge pair`.") }
         for d in list { print("\(d["id"] ?? "")  \(d["name"] ?? "")  (\(d["platform"] ?? ""))  paired \(d["pairedAt"] ?? "")  last seen \(d["lastSeenAt"] ?? "")") }
     case "revoke":
-        guard let id = args.first else { print("Usage: iris-bridge revoke <device-id>"); exit(2) }
+        // The id is the first real argument: `revoke --root /tmp/x abc` revokes abc, not --root.
+        guard let id = line.positionals.first else { refuse("Usage: iris-bridge revoke <device-id>") }
         print(try AdminClient(paths: paths, port: port).revoke(id) ? "Revoked \(id). That device will ask to reconnect." : "No device with id \(id).")
     case "install-agent":
-        guard let binary = option("--binary") else { print("Usage: iris-bridge install-agent --binary <path>"); exit(2) }
-        try LaunchAgent.install(binary: binary); print("Iris Bridge will start automatically when you log in.")
+        guard let typed = line.options["--binary"] else { refuse("Usage: iris-bridge install-agent --binary <path>") }
+        // launchd needs an absolute path and will not tell you if the program is missing: it just fails to
+        // spawn, over and over, into a log nobody reads. Check here instead.
+        let binary = URL(fileURLWithPath: (typed as NSString).expandingTildeInPath).standardizedFileURL.path
+        guard FileManager.default.fileExists(atPath: binary) else {
+            refuse("There is no file at \(binary). Pass the path to the installed helper, like `iris-bridge install-agent --binary \"$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge\"`.")
+        }
+        guard FileManager.default.isExecutableFile(atPath: binary) else {
+            refuse("\(binary) is not something macOS can run. Check the path, or run `chmod +x \"\(binary)\"`.")
+        }
+        try LaunchAgent.install(binary: binary)
+        print("Iris Bridge will start automatically when you log in.")
     case "uninstall":
+        // Deliberately ignores --root: this deletes a folder tree, and it only ever deletes the one the
+        // installer created.
+        let installed = BridgePaths.standard
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let installedBinary = installed.root.appendingPathComponent("bin/iris-bridge")
         try LaunchAgent.uninstall()
-        try? FileManager.default.removeItem(at: paths.root)
-        try? FileManager.default.removeItem(at: URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath())
+        if LaunchAgent.looksLikeBridgeFolder(installed.root) {
+            try? FileManager.default.removeItem(at: installed.root)
+        } else {
+            print("That folder does not look like an Iris Bridge folder; nothing removed.")
+        }
+        // The convenience symlink, but only while it still points at the copy we just removed. Never
+        // argv[0]: that is whatever binary the user happened to run, which may be a build of their own.
+        let link = home.appendingPathComponent(".local/bin/iris-bridge")
+        if let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: link.path) {
+            let target = destination.hasPrefix("/") ? URL(fileURLWithPath: destination)
+                                                    : link.deletingLastPathComponent().appendingPathComponent(destination)
+            if target.standardizedFileURL.path == installedBinary.standardizedFileURL.path {
+                try? FileManager.default.removeItem(at: link)
+            }
+        }
         print("Iris Bridge removed. Claude Code and Codex were left installed.")
-    case "--version", "version": print("iris-bridge \(BridgeVersion.current)")
-    default: print("Usage: iris-bridge [serve|pair|status|devices|revoke <id>|uninstall|version]"); exit(2)
+    case "--version", "version":
+        print("iris-bridge \(BridgeVersion.current)")
+    case "--help", "-h", "help":
+        print(usage)
+    default:
+        complain("iris-bridge: \(line.command) is not a command I know.")
+        refuse(usage)
     }
-} catch { FileHandle.standardError.write(Data("\(error.localizedDescription)\n".utf8)); exit(1) }
+} catch {
+    complain(error.localizedDescription)
+    exit(1)
+}

@@ -8,6 +8,8 @@ public final class BridgeServer: @unchecked Sendable {
     private static let maximumConnections = 16
     /// How long a peer may sit on an accepted connection without finishing a request.
     private static let receiveTimeout: TimeInterval = 30
+    /// How long the listener may stay in .waiting before `start()` gives up on it.
+    private static let startTimeout: TimeInterval = 10
 
     /// Per-connection bookkeeping. Every field is touched only on `queue`, which is serial and is also the
     /// queue the listener, the connection state handler and the receive completions run on.
@@ -45,17 +47,28 @@ public final class BridgeServer: @unchecked Sendable {
         let ready = DispatchSemaphore(value: 0)
         let attemptedPort = requestedPort
         var failure: Error?
+        var waitingError: Error?
         listener.stateUpdateHandler = { [weak self] state in
             switch state {
             case .ready: self?.actualPort = self?.listener.port?.rawValue; ready.signal()
             case .failed(let error): failure = error; ready.signal()
-            case .waiting: failure = Self.portInUse(attemptedPort); ready.signal()
+            case .waiting(let error):
+                // .waiting is not by itself fatal: a listener can pass through it and reach .ready a moment
+                // later (a network interface still coming up, for instance). Only a port that is taken or
+                // forbidden can never resolve itself, so those fail at once and everything else gets the
+                // grace period below, then fails with what the system actually said.
+                if Self.isUnusablePort(error) { failure = Self.portInUse(attemptedPort); ready.signal() }
+                else { waitingError = error }
             default: break
             }
         }
         listener.newConnectionHandler = { [weak self] connection in self?.accept(connection) }
         listener.start(queue: queue)
-        ready.wait()
+        if ready.wait(timeout: .now() + Self.startTimeout) == .timedOut {
+            let reason = waitingError.map { $0.localizedDescription } ?? "it did not finish starting."
+            listener.cancel()
+            throw BridgeError.message("Iris Bridge could not start listening on port \(attemptedPort): \(reason)")
+        }
         if let failure {
             // A busy port usually arrives as .failed(POSIXErrorCode: 48 Address already in use) rather than
             // .waiting, so both routes give the same friendly instruction.
@@ -82,6 +95,14 @@ public final class BridgeServer: @unchecked Sendable {
     private static func isAddressInUse(_ error: Error) -> Bool {
         if let error = error as? NWError, case .posix(.EADDRINUSE) = error { return true }
         return "\(error)".contains("Address already in use")
+    }
+
+    /// A port nobody can bind: already taken, or one this user is not allowed to use. Waiting longer on
+    /// either of these only delays the same failure.
+    private static func isUnusablePort(_ error: NWError) -> Bool {
+        if case .posix(let code) = error, code == .EADDRINUSE || code == .EACCES { return true }
+        let text = "\(error)"
+        return text.contains("Address already in use") || text.contains("Permission denied")
     }
 
     public func stop() { listener.cancel() }

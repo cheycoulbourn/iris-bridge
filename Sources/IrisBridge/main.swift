@@ -104,14 +104,18 @@ do {
         let installed = BridgePaths.standard
         let home = FileManager.default.homeDirectoryForCurrentUser
         let installedBinary = installed.root.appendingPathComponent("bin/iris-bridge")
-        // The marker check comes before anything destructive, including the launchd bootout. If this is not
-        // our folder we have nothing to uninstall, and stopping a helper we then cannot remove would leave
-        // the machine in a worse state than we found it.
-        guard LaunchAgent.looksLikeBridgeFolder(installed.root) else {
-            complain("The Iris Bridge folder is missing or does not look right; nothing was changed. Expected: \(installed.root.path).")
-            exit(1)
-        }
+        // The LaunchAgent goes first and unconditionally: launchd state registered under our label is ours
+        // whatever the support folder looks like. An orphan — folder deleted by hand, or an install that
+        // failed halfway — is exactly the case a user runs `uninstall` to clean up, and a folder check in
+        // front of the bootout would leave a helper running that nothing can stop.
         try LaunchAgent.uninstall()
+        // The folder is a different matter: this deletes a tree, so it only ever deletes one that still
+        // carries our marker files. Anything else is left alone and said so, which is a successful cleanup
+        // of an orphan, not a failure.
+        guard LaunchAgent.looksLikeBridgeFolder(installed.root) else {
+            print("Stopped the Iris Bridge background helper. The support folder at \(installed.root.path) was missing or did not look like an Iris Bridge folder, so it was left alone.")
+            exit(0)
+        }
         try? FileManager.default.removeItem(at: installed.root)
         // The convenience symlink, but only while it still points at the copy we just removed. Never
         // argv[0]: that is whatever binary the user happened to run, which may be a build of their own.

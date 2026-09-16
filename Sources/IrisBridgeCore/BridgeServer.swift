@@ -86,6 +86,8 @@ public final class BridgeServer: @unchecked Sendable {
                 exit(1)
             case .waiting(let error):
                 self?.log?.error("listener waiting: \(error)")
+            // A wait that resolves has to say so, or the log shows only the alarm and never the all-clear.
+            case .ready: self?.log?.info("listener ready again")
             case .cancelled: self?.log?.info("listener cancelled")
             default: break
             }

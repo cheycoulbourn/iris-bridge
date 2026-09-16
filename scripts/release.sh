@@ -8,8 +8,9 @@
 #
 # Recovery, by the point at which it failed:
 #
-#   * Anything up to and including `gh release create` failing BEFORE `git tag`: nothing was published.
-#     Fix the problem and re-run the script. `dist/` is wiped and rebuilt on every run.
+#   * Any failure BEFORE `git tag` (preflight, build, sign, notarize, tarball): nothing outside this Mac was
+#     touched and nothing was published. Fix the problem and re-run the script. `dist/` is wiped and rebuilt
+#     on every run.
 #   * `git push` failed after `git tag` succeeded: the tag exists only locally. Either re-run the script
 #     after deleting it (`git tag -d v$VERSION`) or push it yourself (`git push origin main v$VERSION`)
 #     and continue with `gh release create` by hand.
@@ -44,15 +45,22 @@ if git rev-parse -q --verify "refs/tags/v$VERSION" >/dev/null; then
     echo "v$VERSION already tagged locally; bump the version or delete the tag: git tag -d v$VERSION"
     exit 1
 fi
-if [ -n "$(git ls-remote --tags origin "v$VERSION")" ]; then
+# Fails closed: an unreachable origin is not proof that the tag is free, and guessing wrong here is how a
+# released version gets rebuilt under the same tag.
+if ! REMOTE_TAG=$(git ls-remote --tags origin "v$VERSION"); then
+    echo "Cannot reach origin to check whether v$VERSION is already tagged. Fix the network or the remote, then try again."
+    exit 1
+fi
+if [ -n "$REMOTE_TAG" ]; then
     echo "v$VERSION already tagged on origin; bump the version or delete the tag: git tag -d v$VERSION; git push origin :refs/tags/v$VERSION"
     exit 1
 fi
 
 [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "Release from main."; exit 1; }
 
-# A dirty tree means the tag would not describe what was built.
-git diff --quiet && git diff --cached --quiet || { echo "Commit or stash your changes first."; exit 1; }
+# A dirty tree means the tag would not describe what was built. Untracked files count: a source file nobody
+# committed still compiles into the binary this tag names.
+[ -z "$(git status --porcelain)" ] || { echo "Commit or stash your changes first (untracked files count; see git status)."; exit 1; }
 
 grep -qF "current = \"$VERSION\"" Sources/IrisBridgeCore/Version.swift || { echo "Set BridgeVersion.current to $VERSION first."; exit 1; }
 
@@ -96,7 +104,9 @@ ditto -c -k --keepParent dist/iris-bridge dist/notarize.zip
 # notarytool exits 0 for a submission that completed but was *rejected*, so the accepted status is asserted
 # from the log rather than inferred from the exit code.
 xcrun notarytool submit dist/notarize.zip --keychain-profile "$NOTARY_PROFILE" --wait 2>&1 | tee dist/notary.log || true
-if ! grep -q 'status: Accepted' dist/notary.log; then
+# Anchored: notarytool's own output indents the status, and an unanchored match would also accept the string
+# appearing inside a message or a path.
+if ! grep -q '^ *status: Accepted' dist/notary.log; then
     SUBMISSION_ID=$(sed -n 's/^ *id: *//p' dist/notary.log | head -1)
     echo "Notarization was not accepted. Nothing has been tagged or published."
     echo "Submission id: ${SUBMISSION_ID:-<none found; see dist/notary.log>}"

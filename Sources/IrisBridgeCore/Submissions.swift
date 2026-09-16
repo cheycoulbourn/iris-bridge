@@ -125,6 +125,7 @@ public struct ContextEpisode: Codable, Equatable {
 
 public enum SubmissionLimits {
     public static let characters = 24_000
+    public static let noteCharacters = 2_000
     public static let scenes = 40
     public static let episodes = 52
     public static let pending = 200
@@ -197,6 +198,14 @@ public final class InboxStore: @unchecked Sendable {
         return "sub_" + String(bytes.map { alphabet[Int($0) % alphabet.count] })
     }
 
+    private static let idAlphabet = Set("abcdefghijklmnopqrstuvwxyz0123456789")
+
+    /// True for "sub_" followed by exactly 12 lowercase alphanumerics, the shape `makeID()` produces.
+    static func isSubmissionID(_ id: String) -> Bool {
+        guard id.count == 16, id.hasPrefix("sub_") else { return false }
+        return id.dropFirst(4).allSatisfy { idAlphabet.contains($0) }
+    }
+
     public func submit(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?,
                        agent: String, note: String?, revisionOf: String?) throws -> Submission {
         try SubmissionValidation.validate(kind: kind, post: post, series: series)
@@ -204,12 +213,17 @@ public final class InboxStore: @unchecked Sendable {
         guard submissions.filter({ $0.status == .pending }).count < SubmissionLimits.pending else {
             throw BridgeError.message("Iris has \(SubmissionLimits.pending) submissions waiting. Ask the creator to clear the Inbox first.")
         }
+        if let revisionOf, !Self.isSubmissionID(revisionOf) {
+            throw BridgeError.message("That submission id is not valid.")
+        }
         let cleanAgent = String(agent.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cleanNote = trimmedNote.isEmpty ? nil : String(trimmedNote.prefix(SubmissionLimits.noteCharacters))
         let submission = Submission(id: Self.makeID(), kind: kind,
                                     post: kind == .post ? post : nil,
                                     series: kind == .series ? series : nil,
                                     agent: cleanAgent.isEmpty ? "agent" : cleanAgent,
-                                    note: note, status: .pending, comment: nil,
+                                    note: cleanNote, status: .pending, comment: nil,
                                     createdAt: now(), decidedAt: nil, revisionOf: revisionOf)
         submissions.append(submission)
         try save()

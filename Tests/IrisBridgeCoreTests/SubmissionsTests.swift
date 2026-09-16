@@ -76,6 +76,45 @@ final class SubmissionsTests: XCTestCase {
         XCTAssertNotEqual(second.id, first.id)
     }
 
+    func testLongNoteIsClampedToTwoThousandCharacters() throws {
+        let store = makeStore()
+        let note = String(repeating: "a", count: 10_000)
+        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: note, revisionOf: nil)
+        XCTAssertEqual(submission.note?.count, 2_000)
+        XCTAssertEqual(submission.note, String(repeating: "a", count: 2_000))
+
+        let reloaded = InboxStore(file: store.file)
+        XCTAssertEqual(reloaded.pending.first?.note?.count, 2_000)
+    }
+
+    func testNoteIsTrimmedAndBlankNoteBecomesNil() throws {
+        let store = makeStore()
+        let kept = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: "  Take a look\n", revisionOf: nil)
+        XCTAssertEqual(kept.note, "Take a look")
+        let blank = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: "   \n ", revisionOf: nil)
+        XCTAssertNil(blank.note)
+    }
+
+    func testInvalidRevisionOfIsRefused() throws {
+        let store = makeStore()
+        for bad in ["nope", "sub_SHOUTING123", "sub_abc", "sub_abcdef1234567", "abcdefghijkl", "sub_abcdef 12345", ""] {
+            let error = XCTAssertThrowsErrorReturning {
+                _ = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: bad)
+            }
+            XCTAssertEqual(message(error), "That submission id is not valid.", "revisionOf: \(bad)")
+        }
+        XCTAssertTrue(store.pending.isEmpty)
+    }
+
+    func testValidRevisionOfIsKept() throws {
+        let store = makeStore()
+        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: "sub_abcdef123456")
+        XCTAssertEqual(submission.revisionOf, "sub_abcdef123456")
+
+        let reloaded = InboxStore(file: store.file)
+        XCTAssertEqual(reloaded.pending.first?.revisionOf, "sub_abcdef123456")
+    }
+
     // MARK: validation
 
     func testValidationRejectsMissingPayload() {

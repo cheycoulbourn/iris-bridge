@@ -37,19 +37,30 @@ find_codex() {
 # with no subscription.
 claude_signed_in() {
   _json=$("$1" auth status --json 2>/dev/null) || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    if printf '%s' "$_json" | python3 -c 'import json, sys
+  if [ "${HAVE_PYTHON:-no}" = yes ]; then
+    # 0 means signed in and 3 means not signed in. Any other status — python broke after all, or what the
+    # CLI printed was not JSON — means this path cannot answer, so fall through to the text match below.
+    _rc=0
+    printf '%s' "$_json" | python3 -c 'import json, sys
 try:
     a = json.load(sys.stdin)
 except Exception:
-    sys.exit(1)
+    sys.exit(2)
 ok = (a.get("loggedIn") is True
       and bool(a.get("subscriptionType"))
       and a.get("authMethod") not in ("api_key", "apiKey"))
-sys.exit(0 if ok else 1)'; then return 0; else return 1; fi
+sys.exit(0 if ok else 3)' 2>/dev/null || _rc=$?
+    case "$_rc" in
+      0) return 0;;
+      3) return 1;;
+    esac
   fi
-  # No python3: flatten the JSON to one line and match the same three conditions.
-  _flat=$(printf '%s' "$_json" | tr -d '\n\r')
+  # No usable python3: match the same three conditions by text, but only against the JSON itself — from the
+  # first line that starts with "{" to the brace that closes it. Anything the CLI printed around the JSON is
+  # not JSON, and must not be able to satisfy a condition the helper would evaluate as false.
+  _flat=$(printf '%s\n' "$_json" | awk '!f && /^\{/ { f = 1 }
+f { printf "%s", $0; d += gsub(/\{/, "{") - gsub(/\}/, "}"); if (d <= 0) exit }')
+  [ -n "$_flat" ] || return 1
   printf '%s' "$_flat" | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true' || return 1
   printf '%s' "$_flat" | grep -Eq '"subscriptionType"[[:space:]]*:[[:space:]]*"[^"]+"' || return 1
   if printf '%s' "$_flat" | grep -Eq '"authMethod"[[:space:]]*:[[:space:]]*"(api_key|apiKey)"'; then return 1; fi
@@ -78,6 +89,11 @@ main() {
   if [ "$(id -u)" -eq 0 ]; then note "Run this as your normal user, not with sudo."; exit 1; fi
   if [ "$(uname -s)" != "Darwin" ]; then note "Iris Bridge runs on macOS only."; exit 1; fi
   ARCH=$(uname -m); case "$ARCH" in arm64|x86_64) ;; *) note "Unsupported Mac: $ARCH"; exit 1;; esac
+
+  # On a Mac without the Command Line Tools, /usr/bin/python3 exists but only pops the install dialog and
+  # fails, so "is python3 on the PATH" is the wrong question. Ask once whether it actually runs.
+  HAVE_PYTHON=no
+  if python3 -c 'pass' >/dev/null 2>&1; then HAVE_PYTHON=yes; fi
 
   say "1/5 Downloading Iris Bridge"
   mkdir -p "$BIN_DIR"; chmod 700 "$SUPPORT"
@@ -114,7 +130,6 @@ main() {
   else
     note "Note: could not create the ~/.local/bin/iris-bridge shortcut; use the full path below instead."
   fi
-  export IRIS_BRIDGE_COMMAND
 
   say "2/5 Checking your AI"
   CLAUDE_CLI=""; CODEX_CLI=""
@@ -175,8 +190,10 @@ main() {
     done
     printf '\n'
     note "If another copy of Iris Bridge or the old Python helper is running, stop it and run this command again."
-    # Leaving the agent loaded means launchd respawns the broken helper every few seconds, forever.
+    # Leaving the agent loaded means launchd respawns the broken helper every few seconds, forever, and
+    # leaving the plist behind brings it back at the next login. Take both away.
     launchctl bootout "gui/$(id -u)/$AGENT" >/dev/null 2>&1 || true
+    rm -f "$HOME/Library/LaunchAgents/$AGENT.plist"
     exit 1
   fi
 

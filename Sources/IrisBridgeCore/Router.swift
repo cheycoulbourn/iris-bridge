@@ -219,10 +219,17 @@ public final class Router: @unchecked Sendable {
             let updated = try inbox.decide(id: id, status: status, comment: comment)
             log?.info("inbox \(id) \(status.rawValue)")
             return Self.encoded(200, updated)
+        } catch let error as InboxError {
+            // 404 for a submission that is not here, 409 for one already decided. Anything else reached the store
+            // and failed while writing, which is a server problem, not a missing submission.
+            return HTTPResponse(status: error == .notFound ? 404 : 409, error: error.localizedDescription)
+        } catch BridgeError.message("Not found.") {
+            return HTTPResponse(status: 404, error: "Not found.")
         } catch BridgeError.message("Already decided.") {
             return HTTPResponse(status: 409, error: "Already decided.")
         } catch {
-            return HTTPResponse(status: 404, error: "Not found.")
+            log?.error("inbox \(id) could not be saved")
+            return HTTPResponse(status: 500, error: "Iris Bridge could not save that decision. Try again.")
         }
     }
 
@@ -230,7 +237,17 @@ public final class Router: @unchecked Sendable {
         guard request.body.count <= 256 * 1024 else {
             return HTTPResponse(status: 413, error: "That workspace snapshot is too large.")
         }
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        // The app writes `updatedAt` with fractional seconds; `.iso8601` alone is not guaranteed to read those,
+        // so the snapshot gets the same tolerance `since` does.
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            guard let date = Self.parseTimestamp(text) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath,
+                                                        debugDescription: "Not an ISO 8601 timestamp."))
+            }
+            return date
+        }
         guard let snapshot = try? decoder.decode(WorkspaceContext.self, from: request.body) else {
             return HTTPResponse(status: 400, error: "Could not read that workspace snapshot.")
         }

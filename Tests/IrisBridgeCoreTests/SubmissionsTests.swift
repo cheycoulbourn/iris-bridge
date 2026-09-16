@@ -207,8 +207,13 @@ final class SubmissionsTests: XCTestCase {
         let store = makeStore()
         let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
         _ = try store.decide(id: submission.id, status: .approved, comment: nil)
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try store.decide(id: submission.id, status: .denied, comment: nil) }), "Already decided.")
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try store.decide(id: "sub_000000000000", status: .denied, comment: nil) }), "Not found.")
+        // Typed so the router can pick 409 vs 404 without reading the copy; the sentences are what the app shows.
+        let twice = XCTAssertThrowsErrorReturning { try store.decide(id: submission.id, status: .denied, comment: nil) }
+        XCTAssertEqual(twice as? InboxError, .alreadyDecided)
+        XCTAssertEqual(twice.localizedDescription, "Already decided.")
+        let missing = XCTAssertThrowsErrorReturning { try store.decide(id: "sub_000000000000", status: .denied, comment: nil) }
+        XCTAssertEqual(missing as? InboxError, .notFound)
+        XCTAssertEqual(missing.localizedDescription, "Not found.")
     }
 
     // MARK: all(since:)

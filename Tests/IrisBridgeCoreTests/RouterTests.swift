@@ -233,6 +233,25 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual((reply["comment"] as? String)?.count, 2_000)
     }
 
+    /// A decision the store cannot write is a server error, not a missing submission: the row has already
+    /// changed in memory, and telling the app "Not found." would send it looking for a submission that is there.
+    func testDecisionReportsASaveFailureAsAServerError() {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let doomed = InboxStore(file: dir.appendingPathComponent("inbox.json"))
+        let submission = try! doomed.submit(kind: .post,
+                                            post: SubmittedPost(title: "Three shots", pillar: "Craft", platform: "Instagram", format: "Reel"),
+                                            series: nil, agent: "claude", note: nil, revisionOf: nil)
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: doomed, context: context, generator: generator, log: nil)
+        // The file the store writes through is gone, so `save()` throws where the decision itself would have worked.
+        try! FileManager.default.removeItem(at: dir)
+
+        let (status, body) = send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"approved"}"#, auth: token)
+        XCTAssertEqual(status, 500)
+        XCTAssertEqual(body["error"] as? String, "Iris Bridge could not save that decision. Try again.")
+    }
+
     // MARK: - Context
 
     func testContextRoundTripsFromDeviceToAdmin() {
@@ -259,6 +278,16 @@ final class RouterTests: XCTestCase {
         let filler = String(repeating: "a", count: 260 * 1024)
         let big = #"{"creatorName":"\#(filler)","pillars":[],"platforms":[],"series":[],"updatedAt":"2026-09-16T10:00:00Z"}"#
         XCTAssertEqual(send("PUT", "/context", body: big, auth: token).0, 413)
+    }
+
+    /// The app writes `updatedAt` with fractional seconds. Plain `.iso8601` decoding refuses those, so the
+    /// snapshot is read with the same tolerance `since` gets.
+    func testContextAcceptsFractionalSecondTimestamps() {
+        let payload = #"{"creatorName":"Chey","pillars":[],"platforms":[],"series":[],"updatedAt":"2026-09-16T20:00:00.123Z"}"#
+        let (status, body) = send("PUT", "/context", body: payload, auth: token)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(body["saved"] as? Bool, true)
+        XCTAssertEqual(context.current?.updatedAt.timeIntervalSince1970 ?? 0, 1789588800.123, accuracy: 0.002)
     }
 
     // MARK: - Admin inbox

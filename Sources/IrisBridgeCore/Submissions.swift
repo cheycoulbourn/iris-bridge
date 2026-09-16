@@ -175,6 +175,20 @@ public enum SubmissionValidation {
     private static func trimmed(_ text: String) -> String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
+// MARK: - Inbox errors
+
+/// Why a decision could not be recorded. Typed rather than a sentence so the router picks the status code from
+/// the case; the sentences stay here because they are what the app shows.
+public enum InboxError: Error, Equatable, LocalizedError {
+    case notFound, alreadyDecided
+    public var errorDescription: String? {
+        switch self {
+        case .notFound: return "Not found."
+        case .alreadyDecided: return "Already decided."
+        }
+    }
+}
+
 // MARK: - Inbox store
 
 public final class InboxStore: @unchecked Sendable {
@@ -249,8 +263,8 @@ public final class InboxStore: @unchecked Sendable {
 
     public func decide(id: String, status: SubmissionStatus, comment: String?) throws -> Submission {
         lock.lock(); defer { lock.unlock() }
-        guard let index = submissions.firstIndex(where: { $0.id == id }) else { throw BridgeError.message("Not found.") }
-        guard submissions[index].status == .pending else { throw BridgeError.message("Already decided.") }
+        guard let index = submissions.firstIndex(where: { $0.id == id }) else { throw InboxError.notFound }
+        guard submissions[index].status == .pending else { throw InboxError.alreadyDecided }
         submissions[index].status = status
         submissions[index].comment = comment
         submissions[index].decidedAt = now()

@@ -38,7 +38,10 @@ public final class StdioMCPTransport: MCPTransport {
                 buffer.removeAll()
                 return line.isEmpty ? nil : Data(line)
             }
-            let chunk = try input.read(upToCount: 64 * 1024) ?? Data()
+            // `availableData` returns as soon as the pipe has anything and an empty Data at end of input.
+            // `read(upToCount:)` waits for the full count or EOF, and Claude Code never closes stdin — so the
+            // reply to `initialize` sat behind a read that could not finish, and every connection timed out.
+            let chunk = input.availableData
             if chunk.isEmpty { reachedEnd = true } else { buffer.append(contentsOf: chunk) }
         }
     }

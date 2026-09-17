@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.1
+
+- `iris-bridge mcp` now answers Claude Code. 0.2.0 waited for 64 KB of input or end of input before reading
+  its first message, and Claude Code keeps stdin open for the whole session, so every connection timed out
+  after 30 seconds. The server now reads whatever has arrived. Nothing else changed; run the install
+  command again to pick it up.
+
 ## 0.2.0
 
 - Your agent can send work to Iris. `iris-bridge mcp` is an MCP server for Claude Code with five tools:

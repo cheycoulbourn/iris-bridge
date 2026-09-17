@@ -453,6 +453,24 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(String(decoding: written, as: UTF8.self), "{\"ok\":true}\n")
     }
 
+    /// Claude Code keeps stdin open for the life of the session and expects the reply to `initialize` before
+    /// it writes anything else. A read that waited for 64 KB or end of input never answered, so every
+    /// connection timed out after 30 s even though the server worked fine when fed a closed file.
+    func testAMessageIsReturnedWhileTheInputStaysOpen() throws {
+        let input = Pipe(), output = Pipe()
+        let transport = StdioMCPTransport(input: input.fileHandleForReading, output: output.fileHandleForWriting)
+        try input.fileHandleForWriting.write(contentsOf: Data("{\"a\":1}\n".utf8))
+        let arrived = expectation(description: "first line read without end of input")
+        var message: String?
+        Thread.detachNewThread {
+            message = (try? transport.readMessage()).flatMap { $0 }.map { String(decoding: $0, as: UTF8.self) }
+            arrived.fulfill()
+        }
+        wait(for: [arrived], timeout: 3)
+        XCTAssertEqual(message, "{\"a\":1}")
+        try input.fileHandleForWriting.close()
+    }
+
     /// Blank lines between messages are framing noise, not a parse error: answering -32700 to one would send
     /// an unsolicited error to a client that asked nothing.
     func testBlankLinesAreSkippedAndATrailingLineWithoutANewlineStillArrives() throws {

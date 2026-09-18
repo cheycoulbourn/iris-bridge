@@ -166,12 +166,17 @@ public final class Router: @unchecked Sendable {
             return Self.encoded(200, all ? inbox.all(since: Date(timeIntervalSince1970: 0)) : inbox.pending)
         case ("GET", "/admin/context"):
             guard let current = contextStore.current else {
-                return HTTPResponse(status: 404, error: "No workspace context yet. Open Iris on a paired device.")
+                // Two different problems with two different fixes. A Mac nobody has paired with is where
+                // every new install starts, and the agent is the only one in a position to say so.
+                return HTTPResponse(status: 404, error: devices.all.isEmpty ? Self.notPairedSentence
+                                                                            : "No workspace context yet. Open Iris on a paired device.")
             }
             return Self.encoded(200, current)
         default: return HTTPResponse(status: 404, error: "Not found")
         }
     }
+
+    public static let notPairedSentence = "Iris is not connected to this Mac yet. Ask the creator to run `iris-bridge pair` in Terminal, then open Iris, choose this Mac under Macs nearby and enter the code. Try again once they have."
 
     // MARK: - Inbox and context
 

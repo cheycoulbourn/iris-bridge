@@ -254,6 +254,15 @@ final class RouterTests: XCTestCase {
 
     // MARK: - Context
 
+    /// A Mac nobody has paired with is the state every new install is in, and "open Iris on a paired device"
+    /// tells an agent nothing it can pass on. It is told what the person has to do instead.
+    func testContextOnAnUnpairedMacSaysHowToPair() throws {
+        for device in devices.all { _ = try devices.revoke(id: device.id) }
+        let missing = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(missing.0, 404)
+        XCTAssertEqual(missing.1["error"] as? String, Router.notPairedSentence)
+    }
+
     func testContextRoundTripsFromDeviceToAdmin() {
         let missing = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
         XCTAssertEqual(missing.0, 404)

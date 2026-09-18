@@ -75,6 +75,49 @@ codex_signed_in() {
   esac
 }
 
+# The terminal the person is sitting at, by its real name (/dev/ttys003), or nothing when there is none.
+# Under `curl … | sh` stdin is the pipe, so an interactive CLI has to be handed the terminal explicitly — and
+# it cannot be /dev/tty: Claude Code is a Bun binary, Bun watches stdin with kqueue, and kqueue refuses the
+# /dev/tty alias ("EINVAL: invalid argument, kqueue") while accepting the device it stands for.
+terminal_device() {
+  _t=$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ')
+  case "$_t" in
+    ""|"?"|"??"|-) return 1;;
+  esac
+  [ -c "/dev/$_t" ] || return 1
+  printf '/dev/%s' "$_t"
+}
+
+# Runs a command that needs a person at the keyboard. Returns 75 without running it when nobody is.
+run_interactive() {
+  if [ -t 0 ]; then "$@"; return $?; fi
+  _tty=$(terminal_device) || return 75
+  "$@" <"$_tty"
+}
+
+# Sign-in is the one step the installer cannot do for anyone, so when it does not happen the installer stops
+# with the one command to run, rather than carrying on to a helper the phone will report as "not signed in".
+sign_in() {
+  _name=$1; _check=$2; shift 2
+  _rc=0; run_interactive "$@" || _rc=$?
+  if "$_check" "$1"; then return 0; fi
+  printf '\n'
+  if [ "$_rc" -eq 75 ]; then note "Signing in to $_name needs a Terminal window, and this is not one."
+  else note "You are not signed in to $_name yet."; fi
+  note "Open Terminal, run this, and finish signing in in your browser:"
+  note "  $*"
+  note "Then run the install command again. It will pick up where it left off."
+  exit 1
+}
+
+# Gives Claude Code the Iris tools in every folder. The default scope is "local", which means only the folder
+# the command happened to run in: open Claude Code anywhere else and the tools are simply not there. An older
+# entry is removed first so that running the installer again replaces it instead of failing on a duplicate.
+register_mcp() {
+  "$1" mcp remove iris -s user >/dev/null 2>&1 || true
+  "$1" mcp add -s user iris -- "$BIN" mcp >/dev/null 2>&1
+}
+
 main() {
   PROVIDER=""
   for arg in "$@"; do
@@ -146,7 +189,8 @@ main() {
       if codex_signed_in "$CODEX_CLI"; then CODEX_OK=yes; fi
       if [ "$CLAUDE_OK" = no ] && [ "$CODEX_OK" = yes ]; then PROVIDER=codex; else PROVIDER=claude; fi
     else
-      printf 'Which do you use? [1] Claude  [2] ChatGPT/Codex: '; read -r CHOICE </dev/tty
+      CHOICE=1
+      if _tty=$(terminal_device); then printf 'Which do you use? [1] Claude  [2] ChatGPT/Codex: '; read -r CHOICE <"$_tty"; fi
       [ "$CHOICE" = "2" ] && PROVIDER=codex || PROVIDER=claude
     fi
   fi
@@ -160,7 +204,7 @@ main() {
     fi
     CLI="$CLAUDE_CLI"
     say "3/5 Signing in to Claude"
-    if claude_signed_in "$CLI"; then note "Already signed in to Claude."; else "$CLI" auth login </dev/tty; fi
+    if claude_signed_in "$CLI"; then note "Already signed in to Claude."; else sign_in Claude claude_signed_in "$CLI" auth login; fi
   else
     if [ -z "$CODEX_CLI" ]; then
       note "Installing Codex…"
@@ -170,7 +214,7 @@ main() {
     fi
     CLI="$CODEX_CLI"
     say "3/5 Signing in to ChatGPT"
-    if codex_signed_in "$CLI"; then note "Already signed in to ChatGPT."; else "$CLI" login </dev/tty; fi
+    if codex_signed_in "$CLI"; then note "Already signed in to ChatGPT."; else sign_in ChatGPT codex_signed_in "$CLI" login; fi
   fi
 
   say "4/5 Starting Iris Bridge"
@@ -197,16 +241,30 @@ main() {
     exit 1
   fi
 
+  # Registered before the pairing code is shown, so the code and what to do with it are the last thing on
+  # screen. Claude Code is looked for again here: someone who picked Codex for chat may still use it.
+  MCP_READY=no
+  if [ -z "$CLAUDE_CLI" ]; then CLAUDE_CLI=$(find_claude || true); fi
+  if [ -n "$CLAUDE_CLI" ] && register_mcp "$CLAUDE_CLI"; then MCP_READY=yes; fi
+
   say "5/5 Ready to pair"
   "$BIN" pair
   if [ "$IRIS_BRIDGE_COMMAND" != "iris-bridge" ]; then
-    note "On this Mac that command is: $IRIS_BRIDGE_COMMAND pair"
+    note "  On this Mac that command is: $IRIS_BRIDGE_COMMAND pair"
+    printf '\n'
   fi
-  # The MCP line is printed with $HOME unexpanded on purpose: it is meant to be copied into a shell, where
-  # it will expand, and the literal form is the one that keeps working if the home folder ever moves.
-  printf '\n'
-  note "Next: give Claude Code these tools with:"
-  note '  claude mcp add iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp'
+  say "What to do next"
+  note "  1. On your iPhone or Mac, open Iris, choose this Mac under \"Macs nearby\", and enter the code above."
+  if [ "$MCP_READY" = yes ]; then
+    note "  2. Claude Code now has the Iris tools in every folder. Start a NEW Claude Code session — one that"
+    note "     was already open will not see them — and ask it, for example:"
+    note "       \"Read brief.md and plan it as posts for Iris.\""
+    note "  3. What it sends waits in the Inbox in Ask Iris. Nothing is saved until you approve it there."
+  elif [ -n "$CLAUDE_CLI" ]; then
+    # The literal $HOME is on purpose: this line is meant to be pasted into a shell, where it expands.
+    note "  2. Claude Code could not be given the Iris tools automatically. Run this once:"
+    note '       claude mcp add -s user iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp'
+  fi
 }
 
-main "$@"
+[ "${IRIS_BRIDGE_INSTALL_SOURCED:-}" = 1 ] || main "$@"

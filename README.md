@@ -12,14 +12,20 @@ Commands: `iris-bridge pair`, `iris-bridge status`, `iris-bridge devices`, `iris
 
 ## Send work to Iris from Claude Code
 
-Iris Bridge can also hand Claude Code a set of tools for sending finished work to your Iris Inbox. Register
-it once:
-
-    claude mcp add iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp
+Iris Bridge also hands Claude Code a set of tools for sending finished work to your Iris Inbox. The
+installer registers them for you, in every folder. **Start a new Claude Code session after installing** — a
+session that was already open will not see them.
 
 Then ask for work the way you would ask a person:
 
 > Plan a 4-episode series for my anchor pillar and send it to Iris.
+
+> Read brief.md and plan it as posts for Iris.
+
+If the tools are missing (`claude mcp list` does not show `iris`), register them by hand. The `-s user` matters:
+without it Claude Code only adds them to the one folder you ran the command in.
+
+    claude mcp add -s user iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp
 
 The tools Claude Code gets:
 

@@ -337,8 +337,9 @@ final class SubmissionsTests: XCTestCase {
         XCTAssertEqual(paths.context.deletingLastPathComponent().path, "/tmp/root")
     }
 
-    func testVersionIsZeroTwoZero() {
-        XCTAssertEqual(BridgeVersion.current, "0.2.0")
+    /// The Inbox needs 0.2.0 or newer; pinning the exact version here broke on the very next release.
+    func testVersionSupportsTheInbox() {
+        XCTAssertEqual(BridgeVersion.current.compare("0.2.0", options: .numeric) == .orderedAscending, false)
         XCTAssertEqual(BridgeVersion.protocolVersion, 2)
     }
 }

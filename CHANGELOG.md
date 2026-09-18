@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.2
+
+Run the install command again to pick all of this up.
+
+- On a Mac no device has paired with yet, the Iris tools now tell the agent exactly that, and what the person
+  has to do (`iris-bridge pair`, then enter the code in Iris), instead of "No workspace context yet."
+
+- Signing in to Claude no longer crashes the installer with `EINVAL: invalid argument, kqueue`. The installer
+  handed Claude Code the terminal as `/dev/tty`, which Claude Code's runtime cannot watch; it is now handed
+  the terminal by its real name. This stopped every first-time install on a Mac that was not already signed in.
+- If sign-in does not finish, the installer stops and prints the one command to run, instead of carrying on.
+- The Iris tools are registered in Claude Code automatically, for every folder. The old printed command
+  registered them only for the folder it was run in, so Claude Code opened anywhere else had no Iris tools.
+- The install ends with numbered next steps: pair, start a new Claude Code session, review in the Inbox.
+
 ## 0.2.1
 
 - `iris-bridge mcp` now answers Claude Code. 0.2.0 waited for 64 KB of input or end of input before reading

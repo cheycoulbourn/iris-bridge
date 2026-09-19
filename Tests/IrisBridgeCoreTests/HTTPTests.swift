@@ -33,6 +33,12 @@ final class HTTPTests: XCTestCase {
         let parser = HTTPRequestParser(maxBody: 10)
         guard case .tooLarge = parser.feed(Data("POST /m HTTP/1.1\r\nContent-Length: 11\r\n\r\n".utf8)) else { return XCTFail() }
     }
+    func testDefaultBodyCapMatchesThePlannerSnapshotLimit() {
+        XCTAssertEqual(HTTPRequestParser.maximumBodyBytes, 16 * 1024 * 1024)
+        let parser = HTTPRequestParser()
+        let raw = "PUT /context HTTP/1.1\r\nContent-Length: \(HTTPRequestParser.maximumBodyBytes + 1)\r\n\r\n"
+        guard case .tooLarge = parser.feed(Data(raw.utf8)) else { return XCTFail() }
+    }
     func testRejectsGarbage() {
         let parser = HTTPRequestParser()
         guard case .invalid = parser.feed(Data("not http\r\n\r\n".utf8)) else { return XCTFail() }

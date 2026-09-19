@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4
+
+- Added read-only MCP planner cleanup tools for listing and searching saved posts, getting full post details,
+  and finding candidate duplicate groups. Read replies carry the planner snapshot revision and capture time;
+  attachment metadata is available but binary media is never sent.
+- Added `iris_propose_archive_posts`, which queues a revision-checked archive proposal for explicit Iris
+  review. It has no direct delete or merge path, requires a planner snapshot no older than five minutes, and
+  safely returns the same submission for an identical operation-ID retry even after a decision.
+- Workspace context now carries an optional versioned planner snapshot. The helper accepts snapshots up to
+  16 MiB at both its HTTP parser and context boundary, while legacy context-only updates retain their 256 KiB
+  limit.
+
 ## 0.2.3
 
 - Connected apps can discover the signed-in provider's models and supported reasoning efforts through an authenticated catalog endpoint. Codex uses its app-server catalog; Claude uses its SDK initialization response. No hardcoded account model list or invented effort capabilities.

@@ -205,6 +205,33 @@ final class SubmissionsTests: XCTestCase {
         XCTAssertNoThrow(try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil))
     }
 
+    func testArchiveProposalPersistsAndOperationRetriesStayIdempotentAfterDecision() throws {
+        let store = makeStore()
+        let proposal = ArchiveProposal(accountID: UUID(), operationID: UUID(),
+                                       posts: [ArchiveTarget(id: UUID(), revision: "record-r1")], reason: "Reviewed duplicate")
+        let first = try store.submitArchive(proposal, agent: "codex")
+        XCTAssertEqual(first.kind, .archive)
+        XCTAssertEqual(first.archive, proposal)
+        _ = try store.decide(id: first.id, status: .denied, comment: "Keep it")
+        let retry = try store.submitArchive(proposal, agent: "codex")
+        XCTAssertEqual(retry.id, first.id)
+        XCTAssertEqual(retry.status, .denied)
+        var changed = proposal
+        changed.reason = "Different request"
+        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try store.submitArchive(changed, agent: "codex") }),
+                       "That operation id was already used for a different archive request.")
+        XCTAssertEqual(InboxStore(file: store.file).all(since: Date(timeIntervalSince1970: 0)).count, 1)
+    }
+
+    func testArchiveProposalSaveFailureRollsBackMemory() throws {
+        let directory = makeDirectory()
+        let store = InboxStore(file: directory.appendingPathComponent("inbox.json"))
+        try FileManager.default.removeItem(at: directory)
+        let proposal = ArchiveProposal(accountID: UUID(), operationID: UUID(), posts: [ArchiveTarget(id: UUID(), revision: "r1")], reason: "Review")
+        XCTAssertThrowsError(try store.submitArchive(proposal, agent: "codex"))
+        XCTAssertTrue(store.pending.isEmpty)
+    }
+
     // MARK: decide
 
     func testDecideFlipsStatusAndSetsDecidedAt() throws {

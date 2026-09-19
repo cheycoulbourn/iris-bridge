@@ -11,6 +11,7 @@ private final class FakeAdminClient: AdminClientProtocol {
     var listFailure: Error?
     var contextFailure: Error?
     var submitResult: Submission?
+    var archiveCalls: [ArchiveProposal] = []
     var lastSubmit: (kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?, agent: String, note: String?, revisionOf: String?)?
     var listedStatuses: [String] = []
 
@@ -35,6 +36,13 @@ private final class FakeAdminClient: AdminClientProtocol {
         if let contextFailure { throw contextFailure }
         guard let workspace else { throw BridgeError.message("No workspace context yet. Open Iris on a paired device.") }
         return workspace
+    }
+
+    func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
+        archiveCalls.append(proposal)
+        let submission = Submission(id: "sub_archive0001", kind: .archive, archive: proposal, agent: agent, createdAt: Date())
+        stored.insert(submission, at: 0)
+        return submission
     }
 }
 
@@ -149,11 +157,12 @@ final class MCPServerTests: XCTestCase {
 
     // MARK: - tools/list
 
-    func testToolsListHasTheFiveToolsWithSchemas() {
+    func testToolsListHasPlannerCleanupToolsWithSchemas() {
         let tools = result(#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#)["tools"] as? [[String: Any]] ?? []
         XCTAssertEqual(tools.map { $0["name"] as? String },
                        ["iris_get_workspace_context", "iris_submit_post", "iris_submit_series",
-                        "iris_list_submissions", "iris_revise_submission"])
+                        "iris_list_submissions", "iris_revise_submission", "iris_list_posts",
+                        "iris_get_post", "iris_find_duplicate_posts", "iris_propose_archive_posts"])
         for tool in tools {
             let schema = tool["inputSchema"] as? [String: Any]
             XCTAssertEqual(schema?["type"] as? String, "object", "\(tool["name"] ?? "?") needs an object schema")
@@ -168,6 +177,9 @@ final class MCPServerTests: XCTestCase {
                        ["name", "pillar", "episodes"])
         XCTAssertEqual((byName["iris_revise_submission"]?["inputSchema"] as? [String: Any])?["required"] as? [String], ["id"])
         XCTAssertEqual((byName["iris_get_workspace_context"]?["inputSchema"] as? [String: Any])?["required"] as? [String], [])
+        XCTAssertEqual((byName["iris_list_posts"]?["inputSchema"] as? [String: Any])?["required"] as? [String], ["accountID"])
+        XCTAssertEqual((byName["iris_get_post"]?["inputSchema"] as? [String: Any])?["required"] as? [String], ["accountID", "id"])
+        XCTAssertEqual((byName["iris_propose_archive_posts"]?["inputSchema"] as? [String: Any])?["required"] as? [String], ["accountID", "operationID", "posts", "reason"])
     }
 
     /// The descriptions are the only instructions the agent gets, so the import and review rules are
@@ -388,6 +400,92 @@ final class MCPServerTests: XCTestCase {
         let (text, isError) = call("iris_get_workspace_context")
         XCTAssertTrue(isError)
         XCTAssertEqual(text, "No workspace context yet. Open Iris on a paired device.")
+    }
+
+    // MARK: - Planner cleanup
+
+    private func installPlanner(posts: [PlannerPost], capturedAt: Date = Date()) -> UUID {
+        let accountID = UUID()
+        client.workspace = WorkspaceContext(creatorName: "Chey", pillars: [], platforms: [], series: [], updatedAt: Date(),
+                                            planner: PlannerSnapshot(accountID: accountID, revision: "snapshot-r1", capturedAt: capturedAt, posts: posts))
+        return accountID
+    }
+
+    private func plannerJSON(_ text: String) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
+    }
+
+    func testPlannerReadsAreScopedPaginatedAndKeepExactDetails() {
+        let first = PlannerPost(id: UUID(), revision: "one", title: "Exact  title", platform: "Instagram", format: "Reel", archived: false,
+                                details: ["script": .string("Line one\nLine two"), "attachment": .object(["name": .string("take.mov"), "size": .number(12)])])
+        let second = PlannerPost(id: UUID(), revision: "two", title: "Second", platform: "Instagram", format: "Reel", archived: false, details: [:])
+        let archived = PlannerPost(id: UUID(), revision: "three", title: "Archived", platform: "Instagram", format: "Reel", archived: true, details: [:])
+        let accountID = installPlanner(posts: [first, second, archived])
+        let (listText, listError) = call("iris_list_posts", #"{"accountID":"\#(accountID.uuidString)","limit":1}"#)
+        XCTAssertFalse(listError, listText)
+        let list = plannerJSON(listText)
+        XCTAssertEqual(list["total"] as? Int, 2)
+        XCTAssertEqual(list["nextOffset"] as? Int, 1)
+        XCTAssertNotNil((list["snapshot"] as? [String: Any])?["capturedAt"])
+        let (getText, getError) = call("iris_get_post", #"{"accountID":"\#(accountID.uuidString)","id":"\#(first.id.uuidString)"}"#)
+        XCTAssertFalse(getError, getText)
+        let fetched = plannerJSON(getText)["post"] as? [String: Any]
+        XCTAssertEqual(fetched?["title"] as? String, "Exact  title")
+        let details = fetched?["details"] as? [String: Any]
+        XCTAssertEqual(details?["script"] as? String, "Line one\nLine two")
+        XCTAssertTrue(client.archiveCalls.isEmpty, "planner reads must not mutate")
+        let (_, wrongAccount) = call("iris_list_posts", #"{"accountID":"\#(UUID().uuidString)"}"#)
+        XCTAssertTrue(wrongAccount, "a caller cannot read another account's snapshot")
+    }
+
+    func testDuplicateCandidatesExcludeArchivedPostsAndArchiveProposalChecksFreshRevisions() {
+        let id = UUID()
+        let active = PlannerPost(id: id, revision: "current", title: "Same title", platform: "Instagram", format: "Reel", archived: false, details: [:])
+        let duplicate = PlannerPost(id: UUID(), revision: "other", title: " same   title ", platform: "instagram", format: "reel", archived: false, details: [:])
+        let archived = PlannerPost(id: UUID(), revision: "old", title: "Same title", platform: "Instagram", format: "Reel", archived: true, details: [:])
+        let accountID = installPlanner(posts: [active, duplicate, archived])
+        let (duplicatesText, duplicatesError) = call("iris_find_duplicate_posts", #"{"accountID":"\#(accountID.uuidString)"}"#)
+        XCTAssertFalse(duplicatesError, duplicatesText)
+        XCTAssertEqual(((plannerJSON(duplicatesText)["candidates"] as? [[String: Any]])?.first?["posts"] as? [[String: Any]])?.count, 2)
+        let operationID = UUID()
+        let request = #"{"accountID":"\#(accountID.uuidString)","operationID":"\#(operationID.uuidString)","posts":[{"id":"\#(id.uuidString)","revision":"current"}],"reason":"Confirmed duplicate"}"#
+        let (proposalText, proposalError) = call("iris_propose_archive_posts", request)
+        XCTAssertFalse(proposalError, proposalText)
+        XCTAssertEqual(client.archiveCalls, [ArchiveProposal(accountID: accountID, operationID: operationID, posts: [ArchiveTarget(id: id, revision: "current")], reason: "Confirmed duplicate")])
+        let (_, staleError) = call("iris_propose_archive_posts", #"{"accountID":"\#(accountID.uuidString)","operationID":"\#(UUID().uuidString)","posts":[{"id":"\#(id.uuidString)","revision":"changed"}],"reason":"Retry"}"#)
+        XCTAssertTrue(staleError)
+        XCTAssertEqual(client.archiveCalls.count, 1)
+    }
+
+    func testArchiveProposalRefusesAStaleSnapshotBeforeSendingAnything() {
+        let post = PlannerPost(id: UUID(), revision: "current", title: "Post", platform: "Instagram", format: "Reel", archived: false, details: [:])
+        let accountID = installPlanner(posts: [post], capturedAt: Date().addingTimeInterval(-301))
+        let (readText, readError) = call("iris_list_posts", #"{"accountID":"\#(accountID.uuidString)"}"#)
+        XCTAssertFalse(readError, readText)
+        XCTAssertEqual(plannerJSON(readText)["stale"] as? Bool, true)
+        let (_, isError) = call("iris_propose_archive_posts", #"{"accountID":"\#(accountID.uuidString)","operationID":"\#(UUID().uuidString)","posts":[{"id":"\#(post.id.uuidString)","revision":"current"}],"reason":"Review"}"#)
+        XCTAssertTrue(isError)
+        XCTAssertTrue(client.archiveCalls.isEmpty)
+    }
+
+    func testArchiveProposalRetryReturnsItsDecisionAfterTargetsArchiveAndSnapshotGoesStale() {
+        let post = PlannerPost(id: UUID(), revision: "current", title: "Post", platform: "Instagram", format: "Reel", archived: false, details: [:])
+        let accountID = installPlanner(posts: [post])
+        let operationID = UUID()
+        let request = #"{"accountID":"\#(accountID.uuidString)","operationID":"\#(operationID.uuidString)","posts":[{"id":"\#(post.id.uuidString)","revision":"current"}],"reason":"Review"}"#
+        let (_, initialError) = call("iris_propose_archive_posts", request)
+        XCTAssertFalse(initialError)
+        XCTAssertEqual(client.archiveCalls.count, 1)
+        client.stored[0].status = .approved
+        var archivedPost = post
+        archivedPost.archived = true
+        client.workspace = WorkspaceContext(creatorName: "Chey", pillars: [], platforms: [], series: [], updatedAt: Date(),
+                                            planner: PlannerSnapshot(accountID: accountID, revision: "snapshot-r2", capturedAt: Date().addingTimeInterval(-301), posts: [archivedPost]))
+        let (retryText, retryError) = call("iris_propose_archive_posts", request)
+        XCTAssertFalse(retryError, retryText)
+        XCTAssertEqual(plannerJSON(retryText)["idempotentRetry"] as? Bool, true)
+        XCTAssertEqual((plannerJSON(retryText)["submission"] as? [String: Any])?["status"] as? String, "approved")
+        XCTAssertEqual(client.archiveCalls.count, 1, "a retry must not queue another archive proposal")
     }
 
     // MARK: - Revisions

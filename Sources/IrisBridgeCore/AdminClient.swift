@@ -29,6 +29,16 @@ public protocol AdminClientProtocol: AnyObject {
                 agent: String, note: String?, revisionOf: String?) throws -> Submission
     func listSubmissions(status: String) throws -> [Submission]
     func context() throws -> WorkspaceContext
+    func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission
+}
+
+/// Planner cleanup was added after the original Inbox protocol. Keeping an explicit unsupported default lets
+/// old test doubles and embedding clients continue to compile while an older running helper gives a useful
+/// answer instead of silently treating an archive proposal as a normal post.
+public extension AdminClientProtocol {
+    func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
+        throw BridgeError.message("This Iris Bridge does not support archive proposals. Update Iris Bridge, then try again.")
+    }
 }
 
 public final class AdminClient {
@@ -131,7 +141,15 @@ public final class AdminClient {
     // MARK: - Inbox
 
     private static func inboxDecoder() -> JSONDecoder {
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601; return decoder
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text) { return date }
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Not an ISO 8601 timestamp."))
+        }
+        return decoder
     }
 
     /// A 4xx from the inbox is the helper's own sentence about what is wrong with the submission ("Give the
@@ -157,6 +175,18 @@ public final class AdminClient {
         guard status == 200 else { throw Self.inboxError(status, data, while: "accept that submission") }
         guard let submission = try? Self.inboxDecoder().decode(Submission.self, from: data) else {
             throw BridgeError.message("Iris Bridge did not send back the submission it saved.")
+        }
+        return submission
+    }
+
+    public func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
+        struct Body: Encodable { var kind: SubmissionKind; var archive: ArchiveProposal; var agent: String }
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let body = try encoder.encode(Body(kind: .archive, archive: proposal, agent: agent))
+        let (status, data) = try callData("POST", "/admin/inbox", body: body)
+        guard status == 200 else { throw Self.inboxError(status, data, while: "queue that archive proposal") }
+        guard let submission = try? Self.inboxDecoder().decode(Submission.self, from: data) else {
+            throw BridgeError.message("Iris Bridge did not send back the archive proposal it saved.")
         }
         return submission
     }
@@ -208,4 +238,7 @@ public final class LoopbackAdminClient: AdminClientProtocol {
     }
     public func listSubmissions(status: String) throws -> [Submission] { try client().listSubmissions(status: status) }
     public func context() throws -> WorkspaceContext { try client().context() }
+    public func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
+        try client().submitArchive(proposal, agent: agent)
+    }
 }

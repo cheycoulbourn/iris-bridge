@@ -63,13 +63,13 @@ public final class StdioMCPTransport: MCPTransport {
 
 // MARK: - Server
 
-/// The MCP server behind `iris-bridge mcp`: JSON-RPC 2.0 over stdio, five tools, and nothing of its own to
+/// The MCP server behind `iris-bridge mcp`: JSON-RPC 2.0 over stdio, planner reads and review-only proposals, and nothing of its own to
 /// store. Every tool call goes back through loopback to the running helper, so the agent and the creator are
 /// always looking at the same inbox.
 public struct MCPServer {
     public static let protocolVersion = "2025-06-18"
-    /// Newest first. Both revisions describe the same five tools over the same stdio framing, so a client
-    /// pinned to the older one is answered in the version it asked for rather than told to speak a newer one.
+    /// Newest first. Both revisions use the same stdio framing, so a client pinned to the older one is
+    /// answered in the version it asked for rather than told to speak a newer one.
     public static let protocolVersions = ["2025-06-18", "2024-11-05"]
     public static let notRunning = "Iris Bridge is not running. Run `iris-bridge status` on this Mac."
 
@@ -245,6 +245,39 @@ public struct MCPServer {
                                                           "required": ["name", "pillar", "episodes"]],
                                                "note": ["type": "string", "description": "A short note on what you changed."]],
                                 "required": ["id"]]
+            ],
+            [
+                "name": "iris_list_posts",
+                "description": "Read saved planner posts for one account. Returns exact titles and snapshot metadata; it never changes posts. Use search to find text, includeArchived to include archived records, and offset/limit for complete pagination.",
+                "inputSchema": ["type": "object",
+                                "properties": ["accountID": ["type": "string", "description": "The account UUID from the planner snapshot."],
+                                               "search": ["type": "string", "description": "Optional text to find in saved post fields."],
+                                               "includeArchived": ["type": "boolean", "description": "Include archived posts; false by default."],
+                                               "offset": ["type": "integer", "minimum": 0],
+                                               "limit": ["type": "integer", "minimum": 1, "maximum": 100]],
+                                "required": ["accountID"]]
+            ],
+            [
+                "name": "iris_get_post",
+                "description": "Read one saved planner post, including its exact saved details and attachment metadata. This is read-only and never returns binary media bodies.",
+                "inputSchema": ["type": "object",
+                                "properties": ["accountID": ["type": "string"], "id": ["type": "string", "description": "The post UUID."]],
+                                "required": ["accountID", "id"]]
+            ],
+            [
+                "name": "iris_find_duplicate_posts",
+                "description": "Find candidate duplicate groups among active saved planner posts. Candidates share normalized title, platform and format; they are not proven duplicates and no post is selected or changed.",
+                "inputSchema": ["type": "object", "properties": ["accountID": ["type": "string"]], "required": ["accountID"]]
+            ],
+            [
+                "name": "iris_propose_archive_posts",
+                "description": "Queue an archive proposal for explicit in-app review. Pass the current account ID, a new operation UUID, each target's id and revision, and a reason. It validates a snapshot no older than five minutes. It never archives or deletes directly; Iris must approve each request.",
+                "inputSchema": ["type": "object",
+                                "properties": ["accountID": ["type": "string"], "operationID": ["type": "string", "description": "A UUID retained for safe retries."],
+                                               "posts": ["type": "array", "minItems": 1, "maxItems": 100,
+                                                         "items": ["type": "object", "properties": ["id": ["type": "string"], "revision": ["type": "string"]], "required": ["id", "revision"]]],
+                                               "reason": ["type": "string"]],
+                                "required": ["accountID", "operationID", "posts", "reason"]]
             ]
         ]
     }
@@ -269,6 +302,14 @@ public struct MCPServer {
                 return Self.text(Self.list(try client.listSubmissions(status: status)))
             case "iris_revise_submission":
                 return try revise(arguments)
+            case "iris_list_posts":
+                return try listPosts(arguments)
+            case "iris_get_post":
+                return try getPost(arguments)
+            case "iris_find_duplicate_posts":
+                return try duplicatePosts(arguments)
+            case "iris_propose_archive_posts":
+                return try proposeArchive(arguments)
             default:
                 return Self.failure("iris-bridge has no tool called \(name).")
             }
@@ -304,6 +345,93 @@ public struct MCPServer {
         return Self.text("Revision already exists with status \(submission.status.rawValue). (id: \(submission.id))")
     }
 
+    // MARK: - Planner cleanup tools
+
+    private func plannerSnapshot(accountID text: String) throws -> PlannerSnapshot {
+        guard let accountID = UUID(uuidString: text) else { throw BridgeError.message("That account id is not valid.") }
+        guard let snapshot = try client.context().planner else {
+            throw BridgeError.message("This Iris app has not shared a planner snapshot yet. Open Iris and refresh the planner, then try again.")
+        }
+        guard snapshot.schemaVersion == PlannerSnapshot.schemaVersion else {
+            throw BridgeError.message("This planner snapshot uses an unsupported schema. Update Iris and Iris Bridge, then try again.")
+        }
+        guard snapshot.accountID == accountID else { throw BridgeError.message("That account does not match the current planner snapshot.") }
+        return snapshot
+    }
+
+    private func listPosts(_ arguments: [String: Any]) throws -> [String: Any] {
+        let snapshot = try plannerSnapshot(accountID: Self.required(arguments["accountID"], named: "account id"))
+        let includeArchived = arguments["includeArchived"] as? Bool ?? false
+        let offset = try Self.nonnegative(arguments["offset"], named: "offset", defaultValue: 0)
+        let limit = try Self.limit(arguments["limit"])
+        let search = Self.string(arguments["search"])?.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+        let matching = snapshot.posts.sorted { $0.id.uuidString < $1.id.uuidString }.filter { post in
+            (includeArchived || !post.archived) && (search == nil || Self.searchable(post).contains(search!))
+        }
+        guard offset <= matching.count else { throw BridgeError.message("That offset is past the end of the matching posts.") }
+        let end = min(matching.count, offset + limit)
+        let page = matching[offset..<end].map(Self.summary)
+        return Self.json(["snapshot": Self.snapshotMetadata(snapshot), "stale": Self.isStale(snapshot),
+                          "posts": page, "offset": offset, "limit": limit, "total": matching.count,
+                          "nextOffset": end < matching.count ? end : NSNull()])
+    }
+
+    private func getPost(_ arguments: [String: Any]) throws -> [String: Any] {
+        let snapshot = try plannerSnapshot(accountID: Self.required(arguments["accountID"], named: "account id"))
+        let idText = try Self.required(arguments["id"], named: "post id")
+        guard let id = UUID(uuidString: idText) else {
+            throw BridgeError.message("That post id is not valid.")
+        }
+        guard let post = snapshot.posts.first(where: { $0.id == id }) else { throw BridgeError.message("That post was not found in the current planner snapshot.") }
+        return Self.json(["snapshot": Self.snapshotMetadata(snapshot), "stale": Self.isStale(snapshot), "post": try Self.object(post)])
+    }
+
+    private func duplicatePosts(_ arguments: [String: Any]) throws -> [String: Any] {
+        let snapshot = try plannerSnapshot(accountID: Self.required(arguments["accountID"], named: "account id"))
+        let groups = Dictionary(grouping: snapshot.posts.filter { !$0.archived && Self.duplicateKey($0) != nil }, by: Self.duplicateKey)
+            .compactMap { key, posts -> [String: Any]? in
+                guard let key, posts.count > 1 else { return nil }
+                let ordered = posts.sorted { $0.id.uuidString < $1.id.uuidString }
+                return ["id": key, "title": ordered[0].title, "posts": ordered.map(Self.summary)]
+            }.sorted { ($0["id"] as? String ?? "") < ($1["id"] as? String ?? "") }
+        return Self.json(["snapshot": Self.snapshotMetadata(snapshot), "stale": Self.isStale(snapshot), "candidates": groups])
+    }
+
+    private func proposeArchive(_ arguments: [String: Any]) throws -> [String: Any] {
+        let accountText = try Self.required(arguments["accountID"], named: "account id")
+        let operationText = try Self.required(arguments["operationID"], named: "operation id")
+        guard let accountID = UUID(uuidString: accountText), let operationID = UUID(uuidString: operationText) else {
+            throw BridgeError.message("That account id or operation id is not valid.")
+        }
+        guard let rawTargets = arguments["posts"] as? [[String: Any]] else { throw BridgeError.message("Add one or more archive targets.") }
+        let targets = try rawTargets.map { item -> ArchiveTarget in
+            let idText = try Self.required(item["id"], named: "target post id")
+            guard let id = UUID(uuidString: idText) else { throw BridgeError.message("That target post id is not valid.") }
+            return ArchiveTarget(id: id, revision: try Self.required(item["revision"], named: "target revision"))
+        }
+        let proposal = ArchiveProposal(accountID: accountID, operationID: operationID, posts: targets,
+                                       reason: try Self.required(arguments["reason"], named: "archive reason"))
+        try SubmissionValidation.validate(archive: proposal)
+        // Retries are a read of the persisted operation, not a new proposal. The app may already have
+        // archived its targets or the snapshot may have aged out after the first successful queue, and both
+        // must still return the original submission and its final status without sending a second request.
+        if let existing = try client.listSubmissions(status: "all").first(where: { $0.archive?.operationID == operationID }) {
+            guard existing.archive == proposal else {
+                throw BridgeError.message("That operation id was already used for a different archive request.")
+            }
+            return Self.json(["idempotentRetry": true, "submission": try Self.object(existing)])
+        }
+        let snapshot = try plannerSnapshot(accountID: accountText)
+        guard !Self.isStale(snapshot) else { throw BridgeError.message("The planner snapshot is over five minutes old. Refresh Iris before proposing an archive.") }
+        for target in targets {
+            guard let post = snapshot.posts.first(where: { $0.id == target.id }) else { throw BridgeError.message("An archive target is not in the current planner snapshot.") }
+            guard !post.archived else { throw BridgeError.message("An archive target is already archived.") }
+            guard post.revision == target.revision else { throw BridgeError.message("An archive target changed. Compare the current post and make a new proposal.") }
+        }
+        let submission = try client.submitArchive(proposal, agent: state.agent)
+        return Self.json(["snapshot": Self.snapshotMetadata(snapshot), "submission": try Self.object(submission)])
+    }
+
     private static func text(_ body: String) -> [String: Any] {
         ["content": [["type": "text", "text": body]], "isError": false]
     }
@@ -333,6 +461,25 @@ public struct MCPServer {
     /// "Give the post a title." sentences, and rewording them here would put two different messages in front
     /// of the same mistake.
     private static func required(_ any: Any?) -> String { (any as? String) ?? "" }
+
+    private static func required(_ any: Any?, named name: String) throws -> String {
+        guard let value = any as? String, !value.isEmpty else { throw BridgeError.message("Give the \(name).") }
+        return value
+    }
+
+    private static func nonnegative(_ any: Any?, named name: String, defaultValue: Int) throws -> Int {
+        guard let any, !(any is NSNull) else { return defaultValue }
+        guard let value = any as? NSNumber, !isBoolean(any), value.intValue >= 0, Double(value.intValue) == value.doubleValue else {
+            throw BridgeError.message("Give \(name) as a non-negative whole number.")
+        }
+        return value.intValue
+    }
+
+    private static func limit(_ any: Any?) throws -> Int {
+        let value = try nonnegative(any, named: "limit", defaultValue: 50)
+        guard value > 0 && value <= 100 else { throw BridgeError.message("Give limit as a whole number from 1 to 100.") }
+        return value
+    }
 
     /// An optional whole number. A model that writes `"episode": "3"` is told so rather than having it
     /// dropped: a post that quietly lost its episode number lands in the Inbox belonging to no slot, and
@@ -383,6 +530,51 @@ public struct MCPServer {
         }
         return SubmittedSeries(name: required(arguments["name"]), pillar: required(arguments["pillar"]),
                                summary: string(arguments["summary"]), episodes: episodes)
+    }
+
+    // MARK: - Planner rendering
+
+    private static func snapshotMetadata(_ snapshot: PlannerSnapshot) -> [String: Any] {
+        ["schemaVersion": snapshot.schemaVersion, "accountID": snapshot.accountID.uuidString,
+         "revision": snapshot.revision, "capturedAt": ISO8601DateFormatter().string(from: snapshot.capturedAt)]
+    }
+
+    private static func summary(_ post: PlannerPost) -> [String: Any] {
+        ["id": post.id.uuidString, "revision": post.revision, "title": post.title,
+         "platform": post.platform, "format": post.format, "archived": post.archived]
+    }
+
+    private static func isStale(_ snapshot: PlannerSnapshot, now: Date = Date()) -> Bool {
+        let age = now.timeIntervalSince(snapshot.capturedAt)
+        return age < 0 || age > 5 * 60
+    }
+
+    private static func searchable(_ post: PlannerPost) -> String {
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let details = (try? encoder.encode(post.details)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
+        return (post.title + "\n" + post.platform + "\n" + post.format + "\n" + details)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+    }
+
+    private static func duplicateKey(_ post: PlannerPost) -> String? {
+        func normalized(_ text: String) -> String {
+            text.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+        }
+        let parts = [normalized(post.title), normalized(post.platform), normalized(post.format)]
+        guard parts.allSatisfy({ !$0.isEmpty }) else { return nil }
+        return parts.joined(separator: "\u{1F}")
+    }
+
+    private static func object<T: Encodable>(_ value: T) throws -> Any {
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; encoder.outputFormatting = [.sortedKeys]
+        return try JSONSerialization.jsonObject(with: encoder.encode(value))
+    }
+
+    private static func json(_ object: [String: Any]) -> [String: Any] {
+        guard JSONSerialization.isValidJSONObject(object), let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else { return failure("Iris Bridge could not write that planner response.") }
+        return Self.text(text)
     }
 
     // MARK: - Rendering

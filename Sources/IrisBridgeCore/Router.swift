@@ -197,6 +197,7 @@ public final class Router: @unchecked Sendable {
         var kind: SubmissionKind
         var post: SubmittedPost?
         var series: SubmittedSeries?
+        var archive: ArchiveProposal?
         var agent: String?
         var note: String?
         var revisionOf: String?
@@ -255,7 +256,7 @@ public final class Router: @unchecked Sendable {
     }
 
     private func saveContext(_ request: HTTPRequest) -> HTTPResponse {
-        guard request.body.count <= 256 * 1024 else {
+        guard request.body.count <= HTTPRequestParser.maximumBodyBytes else {
             return HTTPResponse(status: 413, error: "That workspace snapshot is too large.")
         }
         // The app writes `updatedAt` with fractional seconds; `.iso8601` alone is not guaranteed to read those,
@@ -272,6 +273,12 @@ public final class Router: @unchecked Sendable {
         guard let snapshot = try? decoder.decode(WorkspaceContext.self, from: request.body) else {
             return HTTPResponse(status: 400, error: "Could not read that workspace snapshot.")
         }
+        // Keep the original small context budget for older apps while allowing the additive planner snapshot
+        // its documented 16 MiB ceiling. This is checked after decoding so an oversized legacy context does
+        // not gain room merely by adding an unrelated key.
+        guard snapshot.planner != nil || request.body.count <= 256 * 1024 else {
+            return HTTPResponse(status: 413, error: "That workspace snapshot is too large.")
+        }
         do { try contextStore.save(snapshot) } catch {
             log?.error("could not save workspace context")
             return HTTPResponse(status: 500, error: "Could not save that workspace snapshot.")
@@ -284,8 +291,17 @@ public final class Router: @unchecked Sendable {
             return HTTPResponse(status: 400, error: "Could not read that submission.")
         }
         do {
-            let submission = try inbox.submit(kind: body.kind, post: body.post, series: body.series,
-                                              agent: body.agent ?? "agent", note: body.note, revisionOf: body.revisionOf)
+            let submission: Submission
+            if body.kind == .archive {
+                guard let archive = body.archive, body.post == nil, body.series == nil, body.revisionOf == nil else {
+                    return HTTPResponse(status: 400, error: "Could not read that archive proposal.")
+                }
+                submission = try inbox.submitArchive(archive, agent: body.agent ?? "agent", note: body.note)
+            } else {
+                guard body.archive == nil else { return HTTPResponse(status: 400, error: "Archive data belongs in an archive proposal.") }
+                submission = try inbox.submit(kind: body.kind, post: body.post, series: body.series,
+                                               agent: body.agent ?? "agent", note: body.note, revisionOf: body.revisionOf)
+            }
             log?.info("inbox received \(submission.kind.rawValue) \(submission.id) from \(submission.agent)")
             return Self.encoded(200, submission)
         } catch let error as BridgeError {

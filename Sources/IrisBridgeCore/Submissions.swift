@@ -50,14 +50,87 @@ public struct SubmittedSeries: Codable, Equatable {
     }
 }
 
-public enum SubmissionKind: String, Codable { case post, series }
+public enum SubmissionKind: String, Codable { case post, series, archive }
 public enum SubmissionStatus: String, Codable { case pending, approved, denied, changesRequested }
+
+/// JSON carried by a planner snapshot. The app deliberately sends creator text exactly as it is saved, while
+/// binary attachment data stays on-device and is represented by identity/name/type/size metadata in `details`.
+public enum PlannerJSON: Codable, Equatable {
+    case object([String: PlannerJSON]), array([PlannerJSON]), string(String), number(Double), bool(Bool), null
+
+    public init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { self = .null }
+        else if let object = try? value.decode([String: PlannerJSON].self) { self = .object(object) }
+        else if let array = try? value.decode([PlannerJSON].self) { self = .array(array) }
+        else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
+        else if let number = try? value.decode(Double.self) { self = .number(number) }
+        else { self = .string(try value.decode(String.self)) }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var value = encoder.singleValueContainer()
+        switch self {
+        case .object(let object): try value.encode(object)
+        case .array(let array): try value.encode(array)
+        case .string(let string): try value.encode(string)
+        case .number(let number): try value.encode(number)
+        case .bool(let bool): try value.encode(bool)
+        case .null: try value.encodeNil()
+        }
+    }
+}
+
+public struct PlannerPost: Codable, Equatable, Identifiable {
+    public var id: UUID
+    public var revision: String
+    public var title: String
+    public var platform: String
+    public var format: String
+    public var archived: Bool
+    public var details: [String: PlannerJSON]
+    public init(id: UUID, revision: String, title: String, platform: String, format: String,
+                archived: Bool, details: [String: PlannerJSON]) {
+        self.id = id; self.revision = revision; self.title = title; self.platform = platform
+        self.format = format; self.archived = archived; self.details = details
+    }
+}
+
+public struct PlannerSnapshot: Codable, Equatable {
+    public static let schemaVersion = 1
+    public var schemaVersion: Int
+    public var accountID: UUID
+    public var revision: String
+    public var capturedAt: Date
+    public var posts: [PlannerPost]
+    public init(accountID: UUID, revision: String, capturedAt: Date, posts: [PlannerPost], schemaVersion: Int = Self.schemaVersion) {
+        self.schemaVersion = schemaVersion; self.accountID = accountID; self.revision = revision
+        self.capturedAt = capturedAt; self.posts = posts
+    }
+}
+
+public struct ArchiveTarget: Codable, Equatable, Hashable {
+    public var id: UUID
+    public var revision: String
+    public init(id: UUID, revision: String) { self.id = id; self.revision = revision }
+}
+
+public struct ArchiveProposal: Codable, Equatable {
+    public var accountID: UUID
+    public var operationID: UUID
+    public var posts: [ArchiveTarget]
+    public var reason: String
+    public init(accountID: UUID, operationID: UUID, posts: [ArchiveTarget], reason: String) {
+        self.accountID = accountID; self.operationID = operationID; self.posts = posts; self.reason = reason
+    }
+}
 
 public struct Submission: Codable, Equatable, Identifiable {
     public var id: String                  // "sub_" + 12 random alphanumerics
     public var kind: SubmissionKind
     public var post: SubmittedPost?
     public var series: SubmittedSeries?
+    public var archive: ArchiveProposal?
     public var agent: String               // "claude" | "codex" | free text from the MCP client name
     public var note: String?               // the agent's cover note
     public var status: SubmissionStatus
@@ -66,9 +139,10 @@ public struct Submission: Codable, Equatable, Identifiable {
     public var decidedAt: Date?
     public var revisionOf: String?         // when the agent resubmits after changes
     public init(id: String, kind: SubmissionKind, post: SubmittedPost? = nil, series: SubmittedSeries? = nil,
+                archive: ArchiveProposal? = nil,
                 agent: String, note: String? = nil, status: SubmissionStatus = .pending, comment: String? = nil,
                 createdAt: Date, decidedAt: Date? = nil, revisionOf: String? = nil) {
-        self.id = id; self.kind = kind; self.post = post; self.series = series; self.agent = agent; self.note = note
+        self.id = id; self.kind = kind; self.post = post; self.series = series; self.archive = archive; self.agent = agent; self.note = note
         self.status = status; self.comment = comment; self.createdAt = createdAt; self.decidedAt = decidedAt; self.revisionOf = revisionOf
     }
 }
@@ -150,7 +224,11 @@ extension Submission {
     public var displayTitle: String {
         if let title = post?.title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return title }
         if let name = series?.name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return name }
-        return kind == .series ? "Untitled series" : "Untitled post"
+        switch kind {
+        case .series: return "Untitled series"
+        case .archive: return "Archive proposal"
+        case .post: return "Untitled post"
+        }
     }
 
     /// How long this has been waiting, in the shortest form that is still true: "3m", "2h", "1d".
@@ -163,6 +241,9 @@ extension Submission {
 }
 
 public struct WorkspaceContext: Codable, Equatable {   // pushed by the app
+    /// The planner snapshot is additive so an older Iris app and helper keep exchanging their existing
+    /// workspace fields. A snapshot may contain archived posts; the app owns capture and refresh.
+    public var planner: PlannerSnapshot?
     public var creatorName: String
     public var pillars: [ContextPillar]
     public var platforms: [ContextPlatform]
@@ -170,9 +251,10 @@ public struct WorkspaceContext: Codable, Equatable {   // pushed by the app
     public var creatorContext: String?
     public var updatedAt: Date
     public init(creatorName: String, pillars: [ContextPillar], platforms: [ContextPlatform],
-                series: [ContextSeries], creatorContext: String? = nil, updatedAt: Date) {
+                series: [ContextSeries], creatorContext: String? = nil, updatedAt: Date,
+                planner: PlannerSnapshot? = nil) {
         self.creatorName = creatorName; self.pillars = pillars; self.platforms = platforms
-        self.series = series; self.creatorContext = creatorContext; self.updatedAt = updatedAt
+        self.series = series; self.creatorContext = creatorContext; self.updatedAt = updatedAt; self.planner = planner
     }
 }
 
@@ -218,6 +300,7 @@ public enum SubmissionLimits {
     public static let scenes = 40
     public static let episodes = 52
     public static let pending = 200
+    public static let archiveTargets = 100
 }
 
 public enum SubmissionValidation {
@@ -239,6 +322,24 @@ public enum SubmissionValidation {
             var total = series.name.count + (series.summary?.count ?? 0)
             for episode in series.episodes { total += characters(in: episode.post) }
             guard total <= SubmissionLimits.characters else { throw BridgeError.message(tooLong) }
+        case .archive:
+            throw BridgeError.message("Archive proposals must include their target records.")
+        }
+    }
+
+    public static func validate(archive proposal: ArchiveProposal) throws {
+        guard !proposal.posts.isEmpty else { throw BridgeError.message("Choose at least one post to archive.") }
+        guard proposal.posts.count <= SubmissionLimits.archiveTargets else {
+            throw BridgeError.message("Choose up to \(SubmissionLimits.archiveTargets) posts to archive.")
+        }
+        guard Set(proposal.posts.map(\.id)).count == proposal.posts.count else {
+            throw BridgeError.message("Each archive target must appear once.")
+        }
+        guard proposal.posts.allSatisfy({ !$0.revision.isEmpty }) else {
+            throw BridgeError.message("Each archive target needs its current revision.")
+        }
+        guard !proposal.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw BridgeError.message("Give the archive request a reason.")
         }
     }
 
@@ -348,6 +449,32 @@ public final class InboxStore: @unchecked Sendable {
         return submission
     }
 
+    /// Archive requests have an operation id because callers can lose the reply after the helper persists it.
+    /// The retry check runs before pending-capacity validation and includes decided submissions, so retrying
+    /// can never create a second archive card or turn a past decision back into a pending proposal.
+    public func submitArchive(_ proposal: ArchiveProposal, agent: String, note: String? = nil) throws -> Submission {
+        try SubmissionValidation.validate(archive: proposal)
+        lock.lock(); defer { lock.unlock() }
+        if let existing = submissions.first(where: { $0.archive?.operationID == proposal.operationID }) {
+            guard existing.archive == proposal else {
+                throw BridgeError.message("That operation id was already used for a different archive request.")
+            }
+            return existing
+        }
+        guard submissions.filter({ $0.status == .pending }).count < SubmissionLimits.pending else {
+            throw BridgeError.message("Iris has \(SubmissionLimits.pending) submissions waiting. Ask the creator to clear the Inbox first.")
+        }
+        let cleanAgent = String(agent.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
+        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let cleanNote = trimmedNote.isEmpty ? nil : String(trimmedNote.prefix(SubmissionLimits.noteCharacters))
+        let submission = Submission(id: Self.makeID(), kind: .archive, archive: proposal,
+                                    agent: cleanAgent.isEmpty ? "agent" : cleanAgent, note: cleanNote,
+                                    status: .pending, createdAt: now())
+        submissions.append(submission)
+        do { try save() } catch { submissions.removeLast(); throw error }
+        return submission
+    }
+
     /// Pending submissions plus anything created or decided after `since`; `nil` means the last 30 days. Newest first.
     public func all(since: Date?) -> [Submission] {
         lock.lock(); defer { lock.unlock() }
@@ -422,7 +549,14 @@ public final class ContextStore: @unchecked Sendable {
 
     public init(file: URL) {
         self.file = file
-        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            if let date = fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text) { return date }
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Not an ISO 8601 timestamp."))
+        }
         context = try? decoder.decode(WorkspaceContext.self, from: Data(contentsOf: file))
     }
 

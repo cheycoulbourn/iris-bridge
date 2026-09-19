@@ -35,6 +35,10 @@ public struct HTTPRequest {
 }
 
 public final class HTTPRequestParser {
+    /// The largest workspace/planner snapshot the app may publish. The server parses one request at a time,
+    /// so making this the transport ceiling prevents a 28 MB request from being accepted only to be rejected
+    /// later by the context route.
+    public static let maximumBodyBytes = 16 * 1024 * 1024
     public enum Outcome { case needMore, complete(HTTPRequest), invalid(String), tooLarge }
     private var buffer = Data()
     private let maxBody: Int
@@ -47,7 +51,7 @@ public final class HTTPRequestParser {
     private var headers: [String: String] = [:]
     private var bodyStart = 0
     private var length = 0
-    public init(maxBody: Int = 28_000_000) { self.maxBody = maxBody }
+    public init(maxBody: Int = HTTPRequestParser.maximumBodyBytes) { self.maxBody = maxBody }
     public func feed(_ data: Data) -> Outcome {
         buffer.append(data)
         if !headParsed {

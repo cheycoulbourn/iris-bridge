@@ -10,11 +10,11 @@ Then open Iris, choose this Mac under "Macs nearby", and enter the code shown in
 
 Commands: `iris-bridge pair`, `iris-bridge status`, `iris-bridge devices`, `iris-bridge revoke <id>`, `iris-bridge inbox`, `iris-bridge uninstall`.
 
-## Model and reasoning choices (unreleased 0.2.3)
+## Model and reasoning choices (0.2.3)
 
 In a compatible Iris app, open the model dropdown beside Send. It shows models and reasoning choices reported by the provider connected to this Mac. Codex and Claude maintain their own lists; changing models clears an effort the new model does not support. Automatic uses the provider default. If the Mac cannot provide its list, Automatic remains available and the app can refresh later.
 
-Catalog discovery does not send a chat prompt. The authenticated protocol, bounded discovery, cache behavior and test evidence are recorded in [model-catalog-verification.md](docs/model-catalog-verification.md). This source has not yet been released; the public install command still downloads the current published release.
+Catalog discovery does not send a chat prompt. The authenticated protocol, bounded discovery, cache behavior and test evidence are recorded in [model-catalog-verification.md](docs/model-catalog-verification.md). Install 0.2.3 using the public install command above.
 
 ## Send work to Iris from Claude Code or Codex
 

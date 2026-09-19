@@ -46,7 +46,7 @@ public final class BridgeServer: @unchecked Sendable {
         listener.newConnectionLimit = Self.listenerBudget
         if advertise {
             listener.service = NWListener.Service(name: serviceName, type: "_iris-bridge._tcp", domain: nil,
-                                                  txtRecord: NWTXTRecord(["v": "2", "fp": identity.fingerprint, "name": serviceName]))
+                                                  txtRecord: NWTXTRecord(["v": "2", "fp": identity.fingerprint, "name": serviceName, "host": HostName.localHostName()]))
         }
     }
 

@@ -159,7 +159,7 @@ public struct MCPServer {
 
     // MARK: - Tools
 
-    private static let rules = "Call iris_get_workspace_context first and use only pillar, platform and format names that already exist there. Keep every hook under 15 words. Nothing is saved until the creator approves it in Iris."
+    private static let rules = "Call iris_get_workspace_context first and use only pillar, platform and format names that already exist there. Preserve imported creator writing verbatim, including punctuation, line breaks, facts, hooks and captions. Never shorten or paraphrase existing work. Ask the creator to clarify ambiguous field mappings, dates, stages, ownership and merge targets before importing. Read existing submissions before sending work; use iris_revise_submission for requested changes, never a new submission. Nothing is saved until the creator approves it in Iris."
 
     private static let sceneSchema: [String: Any] = [
         "type": "object",
@@ -175,7 +175,7 @@ public struct MCPServer {
             "platform": ["type": "string", "description": "An existing platform name, exactly as the workspace spells it."],
             "format": ["type": "string", "description": "A format that platform already uses, such as Reel or Carousel."],
             "postingDate": ["type": "string", "description": "The day to post, as yyyy-MM-dd. Leave it out for a draft with no date."],
-            "hook": ["type": "string", "description": "The opening line. Under 15 words."],
+            "hook": ["type": "string", "description": "The opening line, verbatim when importing existing work."],
             "script": ["type": "string", "description": "The full script, when the post is one piece to camera."],
             "scenes": ["type": "array", "description": "Scene by scene, when the post is shot in parts.", "items": sceneSchema],
             "caption": ["type": "string", "description": "The caption as it would be posted."],
@@ -298,7 +298,10 @@ public struct MCPServer {
                                            post: kind == .post ? try Self.post(from: post ?? [:]) : nil,
                                            series: kind == .series ? try Self.series(from: series ?? [:]) : nil,
                                            agent: state.agent, note: Self.string(arguments["note"]), revisionOf: id)
-        return Self.text("Sent to Iris for review. (id: \(submission.id))")
+        if submission.status == .pending {
+            return Self.text("Sent to Iris for review. (id: \(submission.id))")
+        }
+        return Self.text("Revision already exists with status \(submission.status.rawValue). (id: \(submission.id))")
     }
 
     private static func text(_ body: String) -> [String: Any] {
@@ -319,11 +322,11 @@ public struct MCPServer {
 
     // MARK: - Arguments
 
-    /// A trimmed string, or `nil` when the key is missing or blank — an empty hook is no hook.
+    /// A string exactly as supplied, or `nil` when the key is missing or explicitly empty. Imported writing
+    /// can use leading/trailing whitespace as meaningful formatting.
     private static func string(_ any: Any?) -> String? {
         guard let text = any as? String else { return nil }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+        return text.isEmpty ? nil : text
     }
 
     /// Required fields are passed through as they were given, empty string and all: the helper owns the

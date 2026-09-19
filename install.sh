@@ -118,6 +118,10 @@ register_mcp() {
   "$1" mcp add -s user iris -- "$BIN" mcp >/dev/null 2>&1
 }
 
+register_codex_mcp() {
+  "$1" mcp add iris -- "$BIN" mcp >/dev/null 2>&1
+}
+
 main() {
   PROVIDER=""
   for arg in "$@"; do
@@ -244,14 +248,24 @@ main() {
   # Registered before the pairing code is shown, so the code and what to do with it are the last thing on
   # screen. Claude Code is looked for again here: someone who picked Codex for chat may still use it.
   MCP_READY=no
+  CODEX_MCP_READY=no
   if [ -z "$CLAUDE_CLI" ]; then CLAUDE_CLI=$(find_claude || true); fi
   if [ -n "$CLAUDE_CLI" ] && register_mcp "$CLAUDE_CLI"; then MCP_READY=yes; fi
+
+  if [ -z "$CODEX_CLI" ]; then CODEX_CLI=$(find_codex || true); fi
+  if [ -n "$CODEX_CLI" ] && register_codex_mcp "$CODEX_CLI"; then CODEX_MCP_READY=yes; fi
 
   say "5/5 Ready to pair"
   "$BIN" pair
   if [ "$IRIS_BRIDGE_COMMAND" != "iris-bridge" ]; then
     note "  On this Mac that command is: $IRIS_BRIDGE_COMMAND pair"
     printf '\n'
+  fi
+  if [ "$CODEX_MCP_READY" = yes ]; then
+    note "Codex is connected to the Iris tools. Open a new Codex session to use them."
+  elif [ -n "$CODEX_CLI" ]; then
+    note "Codex setup needs one more command:"
+    note '  codex mcp add iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp'
   fi
   say "What to do next"
   note "  1. On your iPhone or Mac, open Iris, choose this Mac under \"Macs nearby\", and enter the code above."

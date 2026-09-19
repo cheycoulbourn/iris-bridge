@@ -6,6 +6,7 @@ public struct RequestContext { public var sourceAddress: String; public var isLo
 public protocol Generator {
     func generate(_ request: MessageRequest) throws -> [String: Any]
     func status(_ provider: String) -> ProviderStatus
+    func models(_ provider: String) -> ProviderModelCatalog
     func cancel(_ id: String)
 }
 
@@ -36,6 +37,7 @@ public final class Router: @unchecked Sendable {
         switch (request.method, request.route) {
         case ("GET", "/status"): return statusResponse(trusted: isTrusted(bearer, context: context))
         case ("POST", "/pair"): return pair(request, context: context)
+        case ("GET", "/models"): return authenticated(bearer) { _ in self.models(request) }
         case ("POST", "/message"): return authenticated(bearer) { _ in self.message(request) }
         case ("POST", "/cancel"): return authenticated(bearer) { _ in self.cancel(request) }
         case ("DELETE", "/device"): return authenticated(bearer) { device in
@@ -135,6 +137,15 @@ public final class Router: @unchecked Sendable {
         } catch {
             log?.error("message \(parsed.provider) unreadable"); return HTTPResponse(status: 502, error: "The provider response could not be read. No post was changed.")
         }
+    }
+
+    private func models(_ request: HTTPRequest) -> HTTPResponse {
+        guard let provider = request.query["provider"], ["claude", "codex"].contains(provider) else {
+            return HTTPResponse(status: 400, error: "Choose Claude Code or Codex.")
+        }
+        let catalog = generator.models(provider)
+        guard catalog.provider == provider else { return HTTPResponse(status: 502, error: "Could not read model choices. Keep Automatic selected and try again.") }
+        return Self.encoded(200, catalog)
     }
 
     private func cancel(_ request: HTTPRequest) -> HTTPResponse {

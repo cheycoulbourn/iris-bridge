@@ -313,11 +313,26 @@ public final class InboxStore: @unchecked Sendable {
                        agent: String, note: String?, revisionOf: String?) throws -> Submission {
         try SubmissionValidation.validate(kind: kind, post: post, series: series)
         lock.lock(); defer { lock.unlock() }
-        guard submissions.filter({ $0.status == .pending }).count < SubmissionLimits.pending else {
-            throw BridgeError.message("Iris has \(SubmissionLimits.pending) submissions waiting. Ask the creator to clear the Inbox first.")
-        }
         if let revisionOf, !Self.isSubmissionID(revisionOf) {
             throw BridgeError.message("That submission id is not valid.")
+        }
+        if let revisionOf {
+            guard let original = submissions.first(where: { $0.id == revisionOf }) else {
+                throw BridgeError.message("That submission was not found.")
+            }
+            guard original.kind == kind else { throw BridgeError.message("A revision must keep the original type of work.") }
+            if let existing = submissions.first(where: { $0.revisionOf == revisionOf }) {
+                // A lost response must not turn a retry into a second approval card.
+                if existing.post == post && existing.series == series { return existing }
+                throw BridgeError.message("A revision already exists. Read its status and revise that submission after the creator requests changes.")
+            }
+            guard original.status == .changesRequested else {
+                throw BridgeError.message("The creator must request changes before this submission can be revised.")
+            }
+        }
+        // A retry of an already-created revision must remain idempotent even when the Inbox is at capacity.
+        guard submissions.filter({ $0.status == .pending }).count < SubmissionLimits.pending else {
+            throw BridgeError.message("Iris has \(SubmissionLimits.pending) submissions waiting. Ask the creator to clear the Inbox first.")
         }
         let cleanAgent = String(agent.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
         let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -329,7 +344,7 @@ public final class InboxStore: @unchecked Sendable {
                                     note: cleanNote, status: .pending, comment: nil,
                                     createdAt: now(), decidedAt: nil, revisionOf: revisionOf)
         submissions.append(submission)
-        try save()
+        do { try save() } catch { submissions.removeLast(); throw error }
         return submission
     }
 

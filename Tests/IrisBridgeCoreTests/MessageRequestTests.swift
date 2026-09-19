@@ -20,7 +20,29 @@ final class MessageRequestTests: XCTestCase {
         XCTAssertThrowsError(try MessageValidation.parse(Data(body.utf8))) { XCTAssertEqual($0 as? BridgeError, .message("Choose up to four images.")) }
     }
     func testValidRequestParses() throws {
-        let request = try MessageValidation.parse(Data(#"{"id":"r1","provider":"claude","message":"Plan","planMode":true,"images":[{"mime":"image/png","data":"AA=="}]}"#.utf8))
+        let request = try MessageValidation.parse(Data(#"{"id":"r1","provider":"claude","message":"Plan","model":"claude-custom-v1","planMode":true,"images":[{"mime":"image/png","data":"AA=="}]}"#.utf8))
         XCTAssertEqual(request.id, "r1"); XCTAssertEqual(request.provider, "claude"); XCTAssertEqual(request.planMode, true)
+        XCTAssertEqual(request.model, "claude-custom-v1")
+    }
+    func testInvalidModelIdentifierRejected() {
+        for value in ["", "   ", "--help", "model name", String(repeating: "x", count: 121)] {
+            let encoded = String(data: try! JSONEncoder().encode(value), encoding: .utf8)!
+            let body = "{\"provider\":\"codex\",\"message\":\"hi\",\"model\":\(encoded)}"
+            XCTAssertThrowsError(try MessageValidation.parse(Data(body.utf8))) { error in
+                XCTAssertEqual(error as? BridgeError, .message("Choose a valid model identifier."))
+            }
+        }
+    }
+    func testEffortParsesProviderTokensAndRejectsMalformedValues() throws {
+        for effort in ["xhigh", "ultra", "none", "minimal"] {
+            let request = try MessageValidation.parse(Data("{\"provider\":\"codex\",\"message\":\"hi\",\"effort\":\"\(effort)\"}".utf8))
+            XCTAssertEqual(request.effort, effort)
+        }
+        for effort in ["", "not valid", "High"] {
+            let body = "{\"provider\":\"codex\",\"message\":\"hi\",\"effort\":\"\(effort)\"}"
+            XCTAssertThrowsError(try MessageValidation.parse(Data(body.utf8))) { error in
+                XCTAssertEqual(error as? BridgeError, .message("Choose a valid reasoning effort."))
+            }
+        }
     }
 }

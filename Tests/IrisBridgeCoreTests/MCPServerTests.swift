@@ -10,6 +10,7 @@ private final class FakeAdminClient: AdminClientProtocol {
     var submitFailure: Error?
     var listFailure: Error?
     var contextFailure: Error?
+    var submitResult: Submission?
     var lastSubmit: (kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?, agent: String, note: String?, revisionOf: String?)?
     var listedStatuses: [String] = []
 
@@ -17,6 +18,7 @@ private final class FakeAdminClient: AdminClientProtocol {
                 agent: String, note: String?, revisionOf: String?) throws -> Submission {
         lastSubmit = (kind, post, series, agent, note, revisionOf)
         if let submitFailure { throw submitFailure }
+        if let submitResult { return submitResult }
         let submission = Submission(id: "sub_abcdef123456", kind: kind, post: post, series: series,
                                     agent: agent, note: note, createdAt: Date(), revisionOf: revisionOf)
         stored.insert(submission, at: 0)
@@ -168,7 +170,7 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual((byName["iris_get_workspace_context"]?["inputSchema"] as? [String: Any])?["required"] as? [String], [])
     }
 
-    /// The descriptions are the only instructions the agent gets, so the four rules the spec names are
+    /// The descriptions are the only instructions the agent gets, so the import and review rules are
     /// asserted rather than trusted to survive an edit.
     func testDescriptionsCarryTheRulesTheAgentMustFollow() {
         let tools = result(#"{"jsonrpc":"2.0","id":5,"method":"tools/list"}"#)["tools"] as? [[String: Any]] ?? []
@@ -178,7 +180,9 @@ final class MCPServerTests: XCTestCase {
             let description = tool["description"] as? String ?? ""
             XCTAssertTrue(description.contains("iris_get_workspace_context"), "\(tool["name"] ?? "?"): \(description)")
             XCTAssertTrue(description.contains("already exist"), "\(tool["name"] ?? "?"): \(description)")
-            XCTAssertTrue(description.contains("15 words"), "\(tool["name"] ?? "?"): \(description)")
+            XCTAssertTrue(description.contains("Preserve imported creator writing verbatim"), "\(tool["name"] ?? "?"): \(description)")
+            XCTAssertTrue(description.contains("Never shorten or paraphrase existing work"), "\(tool["name"] ?? "?"): \(description)")
+            XCTAssertTrue(description.contains("Read existing submissions before sending work"), "\(tool["name"] ?? "?"): \(description)")
             XCTAssertTrue(description.contains("Nothing is saved until"), "\(tool["name"] ?? "?"): \(description)")
         }
     }
@@ -194,6 +198,21 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(client.lastSubmit?.post?.scenes?.first?.shotNotes, "wide")
         XCTAssertEqual(client.lastSubmit?.note, "Ready for you.")
         XCTAssertNil(client.lastSubmit?.revisionOf)
+    }
+
+    func testSubmitPostPreservesImportedTextExactlyThroughMCPParsing() {
+        let original = "  Keep this hook exactly as written.\n\nKeep the comma, ellipsis… and em—dash.  \t"
+        let script = "Line one.\r\nLine two with !?;\n\n  trailing spaces  "
+        let caption = "Caption with \"quotes\", apostrophe's, and #punctuation."
+        func jsonString(_ value: String) -> String {
+            String(data: try! JSONEncoder().encode(value), encoding: .utf8)!
+        }
+        let arguments = "{\"title\":\"Three shots\",\"pillar\":\"Craft\",\"platform\":\"Instagram\",\"format\":\"Reel\",\"hook\":\(jsonString(original)),\"script\":\(jsonString(script)),\"caption\":\(jsonString(caption))}"
+        let (text, isError) = call("iris_submit_post", arguments)
+        XCTAssertFalse(isError, text)
+        XCTAssertEqual(client.lastSubmit?.post?.hook, original)
+        XCTAssertEqual(client.lastSubmit?.post?.script, script)
+        XCTAssertEqual(client.lastSubmit?.post?.caption, caption)
     }
 
     func testSubmitSeriesCarriesEveryEpisode() {
@@ -398,6 +417,18 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(client.lastSubmit?.revisionOf, "sub_aaaaaaaaaaaa")
         XCTAssertEqual(client.lastSubmit?.note, "Shorter hook.")
         XCTAssertEqual(client.listedStatuses, ["all"])
+    }
+
+    func testAnIdempotentRevisionRetryReportsItsExistingDecisionStatus() {
+        client.stored = [Submission(id: "sub_aaaaaaaaaaaa", kind: .post,
+                                    post: SubmittedPost(title: "Older", pillar: "Craft", platform: "Instagram", format: "Reel"),
+                                    agent: "claude", status: .changesRequested, createdAt: Date())]
+        client.submitResult = Submission(id: "sub_abcdef654321", kind: .post,
+                                         post: SubmittedPost(title: "Three shots", pillar: "Craft", platform: "Instagram", format: "Reel", hook: "Do this once"), agent: "claude",
+                                         status: .approved, createdAt: Date(), revisionOf: "sub_aaaaaaaaaaaa")
+        let (text, isError) = call("iris_revise_submission", #"{"id":"sub_aaaaaaaaaaaa","post":\#(samplePost)}"#)
+        XCTAssertFalse(isError, text)
+        XCTAssertEqual(text, "Revision already exists with status approved. (id: sub_abcdef654321)")
     }
 
     func testARevisionWithNeitherAPostNorASeriesSaysWhatIsMissing() {

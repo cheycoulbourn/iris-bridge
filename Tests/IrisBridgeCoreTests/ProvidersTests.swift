@@ -14,6 +14,12 @@ private func result(_ stdout: String = "", stderr: String = "", status: Int32 = 
 private func lines(_ events: [[String: Any]]) -> String {
     events.map { String(data: try! JSONSerialization.data(withJSONObject: $0), encoding: .utf8)! }.joined(separator: "\n")
 }
+private func catalog(_ provider: String, _ _: String) throws -> ProviderModelCatalog {
+    if provider == "codex" {
+        return ProviderModelCatalog(provider: provider, models: [ProviderModel(id: "gpt-custom-v1", name: "Codex", efforts: ["low", "medium", "high"], defaultEffort: "medium")], source: "test", defaultModelID: "gpt-custom-v1")
+    }
+    return ProviderModelCatalog(provider: provider, models: [ProviderModel(id: "claude-custom-v1", name: "Claude", efforts: ["low", "medium", "high", "xhigh", "max"], defaultEffort: "medium")], source: "test", defaultModelID: "claude-custom-v1")
+}
 
 final class ProvidersTests: XCTestCase {
     func testSubscriptionEnvironmentStripsKeys() {
@@ -45,6 +51,26 @@ final class ProvidersTests: XCTestCase {
         now = now.addingTimeInterval(61); _ = service.status("codex")
         XCTAssertEqual(runner.calls.count, 2)
     }
+    func testModelCatalogCacheIsExplicitlyLabeled() {
+        let runner = FakeRunner { _, _ in result(stderr: "Logged in using ChatGPT") }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: catalog)
+        XCTAssertEqual(service.models("codex").source, "test")
+        let cached = service.models("codex")
+        XCTAssertEqual(cached.source, "cached-test")
+        XCTAssertEqual(cached.notice, "Cached less than one minute ago.")
+    }
+    func testCachedUnavailableCatalogPreservesAutomaticGuidanceAndNilDefault() {
+        let runner = FakeRunner { _, _ in result(stderr: "Logged in using ChatGPT") }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: { provider, _ in
+            ProviderModelCatalog(provider: provider, models: [], source: "unavailable", notice: "Keep Automatic selected and try again.")
+        })
+        _ = service.models("codex")
+        let cached = service.models("codex")
+        XCTAssertEqual(cached.source, "cached-unavailable")
+        XCTAssertNil(cached.defaultModelID)
+        XCTAssertEqual(cached.notice, "Keep Automatic selected and try again. Cached less than one minute ago.")
+    }
+
     func testClaudeGenerateReportsModelAndBlocksKeyBilling() throws {
         var source = "none"
         let runner = FakeRunner { args, _ in
@@ -90,17 +116,15 @@ final class ProvidersTests: XCTestCase {
         XCTAssertThrowsError(try runner.run(["/usr/bin/true"], input: nil, cwd: nil, timeout: 5, requestID: "cancel-1")) { XCTAssertEqual($0 as? BridgeError, .canceled) }
     }
 
-    // MARK: - Fix round 1: verbatim contract with the Python helper
+    // MARK: - Verbatim contract
 
-    func testSystemPromptMatchesPythonHelper() {
-        XCTAssertEqual(BridgePrompt.system.count, 1501)
+    func testSystemPromptCarriesTheVerbatimImportContract() {
+        XCTAssertGreaterThan(BridgePrompt.system.count, 1500)
         XCTAssertTrue(BridgePrompt.system.hasPrefix("You are Iris, Iris's content planning as"))
         XCTAssertTrue(BridgePrompt.system.hasSuffix("ed; only the creator can decide in Iris."))
-        // Derived from the SYSTEM literal in Bridge/iris_bridge.py line 18: the text between its
-        // triple-quote delimiters piped through `printf '%s' "$TEXT" | shasum -a 256`.
-        let pythonDigest = "cc0981392a8785c5bfa3fa29a6859869d28dbe18845aa81443015ab69d725115"
-        let digest = SHA256.hash(data: Data(BridgePrompt.system.utf8)).map { String(format: "%02x", $0) }.joined()
-        XCTAssertEqual(digest, pythonDigest)
+        XCTAssertTrue(BridgePrompt.system.contains("copy the original writing exactly"))
+        XCTAssertTrue(BridgePrompt.system.contains("never paraphrase, shorten or rewrite it"))
+        XCTAssertTrue(BridgePrompt.system.contains("ask specific clarification questions"))
     }
 
     func testSchemaMatchesPythonHelper() throws {
@@ -141,7 +165,7 @@ final class ProvidersTests: XCTestCase {
         }
         _ = try ProviderService(runner: runner, executableLookup: { _ in "/tool" }).generate(MessageRequest(provider: "claude", message: "Hello"))
         let main = try XCTUnwrap(runner.calls.first { $0.contains("--json-schema") })
-        XCTAssertEqual(main, ["/tool", "-p", "--safe-mode", "--model", "best", "--effort", "medium", "--tools", "",
+        XCTAssertEqual(main, ["/tool", "-p", "--safe-mode", "--tools", "",
                               "--permission-mode", "dontAsk", "--disable-slash-commands", "--strict-mcp-config",
                               "--mcp-config", "{\"mcpServers\":{}}", "--no-session-persistence",
                               "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
@@ -156,19 +180,156 @@ final class ProvidersTests: XCTestCase {
         }
         _ = try ProviderService(runner: runner, executableLookup: { _ in "/tool" }).generate(MessageRequest(provider: "codex", message: "Hi"))
         let main = try XCTUnwrap(runner.calls.first { $0.contains("exec") })
-        XCTAssertEqual(main.count, 31)
+        XCTAssertEqual(main.count, 29)
         XCTAssertEqual(main[8], "--output-schema")
         let schemaPath = main[9]
         XCTAssertTrue(schemaPath.hasSuffix("/response-schema.json"), schemaPath)
         XCTAssertTrue(schemaPath.contains("/iris-bridge-"), schemaPath)
         var expected = ["/tool", "exec", "--ignore-user-config", "--skip-git-repo-check", "--ephemeral", "--sandbox",
-                        "read-only", "--json", "--output-schema", schemaPath, "-c", "web_search=\"disabled\"",
-                        "-c", "model_reasoning_effort=\"medium\""]
+                        "read-only", "--json", "--output-schema", schemaPath, "-c", "web_search=\"disabled\""]
         for feature in ["shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "js_repl", "code_mode", "hooks"] {
             expected += ["--disable", feature]
         }
         expected.append("-")
         XCTAssertEqual(main, expected)
+    }
+
+    func testSelectedModelIsForwardedToClaude() throws {
+        let runner = FakeRunner { args, _ in
+            if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
+            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"],
+                                 ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
+        }
+        _ = try ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: catalog).generate(MessageRequest(provider: "claude", message: "Hello", model: "claude-custom-v1"))
+        let main = try XCTUnwrap(runner.calls.first { $0.contains("--json-schema") })
+        let index = try XCTUnwrap(main.firstIndex(of: "--model"))
+        XCTAssertEqual(main[index + 1], "claude-custom-v1")
+    }
+
+    func testSelectedModelIsForwardedToCodex() throws {
+        let reply = #"{"reply":"Ready","proposal":null}"#
+        let runner = FakeRunner { args, _ in
+            if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
+            return result(lines([["type": "item.completed", "item": ["type": "agent_message", "text": reply]], ["type": "turn.completed"]]))
+        }
+        _ = try ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: catalog).generate(MessageRequest(provider: "codex", message: "Hi", model: "gpt-custom-v1"))
+        let main = try XCTUnwrap(runner.calls.first { $0.contains("exec") })
+        let index = try XCTUnwrap(main.firstIndex(of: "--model"))
+        XCTAssertEqual(main[index + 1], "gpt-custom-v1")
+    }
+
+    func testNilModelLeavesProviderDefaultsUnselected() throws {
+        let runner = FakeRunner { args, _ in
+            if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
+            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
+            if args.contains("--json-schema") { return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"], ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]])) }
+            return result(lines([["type": "item.completed", "item": ["type": "agent_message", "text": #"{"reply":"Ready","proposal":null}"#]], ["type": "turn.completed"]]))
+        }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" })
+        _ = try service.generate(MessageRequest(provider: "claude", message: "Hello"))
+        _ = try service.generate(MessageRequest(provider: "codex", message: "Hi"))
+        XCTAssertFalse(runner.calls.contains { $0.contains("--model") })
+    }
+
+    func testSelectedEffortIsForwardedToEachProvider() throws {
+        let runner = FakeRunner { args, _ in
+            if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
+            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
+            if args.contains("--json-schema") { return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"], ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]])) }
+            return result(lines([["type": "item.completed", "item": ["type": "agent_message", "text": #"{"reply":"Ready","proposal":null}"#]], ["type": "turn.completed"]]))
+        }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: catalog)
+        _ = try service.generate(MessageRequest(provider: "claude", message: "Hi", model: "claude-custom-v1", effort: "xhigh"))
+        _ = try service.generate(MessageRequest(provider: "codex", message: "Hi", model: "gpt-custom-v1", effort: "high"))
+        let claude = try XCTUnwrap(runner.calls.first { $0.contains("--json-schema") })
+        XCTAssertEqual(claude[try XCTUnwrap(claude.firstIndex(of: "--effort")) + 1], "xhigh")
+        let codex = try XCTUnwrap(runner.calls.first { $0.contains("exec") })
+        XCTAssertTrue(codex.contains("model_reasoning_effort=\"high\""))
+    }
+
+    func testUnsupportedEffortAndUnavailableCatalogAreRejectedBeforeGeneration() {
+        let runner = FakeRunner { _, _ in result(stderr: "Logged in using ChatGPT") }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: catalog)
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "codex", message: "Hi", model: "gpt-custom-v1", effort: "xhigh"))) { error in
+            XCTAssertEqual(error as? BridgeError, .message("That effort is not available for the selected model."))
+        }
+        let unavailable = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: { _, _ in throw BridgeError.timeout })
+        XCTAssertThrowsError(try unavailable.generate(MessageRequest(provider: "codex", message: "Hi", effort: "high"))) { error in
+            XCTAssertEqual(error as? BridgeError, .message("Model choices are unavailable. Keep Automatic selected and try again."))
+        }
+    }
+
+    func testCatalogDiscoveryParsesChunkedCodexAndClaudeControlStreams() throws {
+        let script = FileManager.default.temporaryDirectory.appendingPathComponent("iris-catalog-stub-\(UUID().uuidString).sh")
+        let contents = #"""
+        #!/bin/sh
+        IFS= read -r first || exit 1
+        case "$*" in
+          *app-server*)
+            printf '%s' '{"id":"initialize","result":'
+            printf '%s\n' '{}}'
+            IFS= read -r second || exit 1
+            printf '%s' '{"id":"models-0","result":{"data":[{"model":"codex-live","displayName":"Codex Live","hidden":false,"isDefault":true,"defaultReasoningEffort":"ultra","supportedReasoningEfforts":[{"reasoningEffort":"none"},{"reasoningEffort":"ultra"}]}]'
+            printf '%s\n' '}}'
+            ;;
+          *)
+            printf '%s' '{"type":"control_response","response":{"request_id":"iris-'
+            printf '%s\n' 'models","subtype":"success","response":{"models":[{"value":"claude-live","displayName":"Claude Live","supportsEffort":true,"supportedEffortLevels":["low","max"]}]}}}'
+            ;;
+        esac
+        """#
+        try (contents.trimmingCharacters(in: .whitespacesAndNewlines) + "\n").write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        defer { try? FileManager.default.removeItem(at: script) }
+
+        let codex = try ProviderService.discoverCatalog(provider: "codex", binary: script.path)
+        XCTAssertEqual(codex.models, [ProviderModel(id: "codex-live", name: "Codex Live", efforts: ["none", "ultra"], defaultEffort: "ultra")])
+        let claude = try ProviderService.discoverCatalog(provider: "claude", binary: script.path)
+        XCTAssertEqual(claude.models, [ProviderModel(id: "claude-live", name: "Claude Live", efforts: ["low", "max"])])
+    }
+
+    func testLiveCatalogDiscoveryUsesShippingParserWhenExplicitlyRequested() throws {
+        guard ProcessInfo.processInfo.environment["IRIS_BRIDGE_LIVE_CATALOG"] == "1" else {
+            throw XCTSkip("Set IRIS_BRIDGE_LIVE_CATALOG=1 for local, read-only installed-CLI discovery.")
+        }
+        for provider in ["codex", "claude"] {
+            guard let binary = ProviderService.findExecutable(provider) else {
+                throw XCTSkip("\(provider) is not installed on this Mac.")
+            }
+            let catalog = try ProviderService.discoverCatalog(provider: provider, binary: binary)
+            XCTAssertEqual(catalog.provider, provider)
+            XCTAssertFalse(catalog.models.isEmpty)
+            XCTAssertEqual(Set(catalog.models.map(\.id)).count, catalog.models.count)
+        }
+    }
+
+    func testCodexCatalogUsesOnlyServerAdvertisedModelCapabilities() {
+        let reply: [String: Any] = ["data": [["model": "gpt-real", "displayName": "Codex Real", "hidden": false, "isDefault": true,
+                                                   "defaultReasoningEffort": "high", "supportedReasoningEfforts": [["reasoningEffort": "none"], ["reasoningEffort": "minimal"], ["reasoningEffort": "ultra"]]],
+                                                 ["model": "gpt-real", "displayName": "Duplicate", "hidden": false, "isDefault": false,
+                                                   "supportedReasoningEfforts": []],
+                                                 ["model": "gpt-hidden", "displayName": "Hidden", "hidden": true, "isDefault": false,
+                                                   "defaultReasoningEffort": "medium", "supportedReasoningEfforts": [["reasoningEffort": "medium"]]]]]
+        let result = ProviderService.codexCatalog(from: reply)
+        XCTAssertEqual(result?.source, "live-codex-app-server")
+        XCTAssertEqual(result?.defaultModelID, "gpt-real")
+        XCTAssertEqual(result?.models, [ProviderModel(id: "gpt-real", name: "Codex Real", efforts: ["none", "minimal", "ultra"], defaultEffort: "high")])
+    }
+
+    func testClaudeCatalogUsesInitializeCapabilitiesWithoutAliasFallback() {
+        let reply: [String: Any] = ["models": [["value": "default", "displayName": "Default", "supportsEffort": true,
+                                                   "supportedEffortLevels": ["low", "ultra"]],
+                                                 ["value": "claude-haiku", "displayName": "Haiku", "supportsEffort": false],
+                                                 ["value": "default", "displayName": "Duplicate", "supportsEffort": true,
+                                                   "supportedEffortLevels": ["max"]]]]
+        let result = ProviderService.claudeCatalog(from: reply)
+        XCTAssertEqual(result?.source, "live-claude-sdk-initialize")
+        XCTAssertEqual(result?.defaultModelID, "default")
+        XCTAssertEqual(result?.models, [ProviderModel(id: "default", name: "Default", efforts: ["low", "ultra"]),
+                                       ProviderModel(id: "claude-haiku", name: "Haiku", efforts: [])])
     }
 
     func testStdinWriteDoesNotEscapeTimeout() {

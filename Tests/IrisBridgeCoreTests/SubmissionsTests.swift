@@ -48,6 +48,17 @@ final class SubmissionsTests: XCTestCase {
         XCTAssertEqual(reloaded.pending.first?.post, samplePost())
     }
 
+    func testImportedWhitespacePunctuationAndLineBreaksSurviveDiskRoundTrip() throws {
+        let store = makeStore()
+        var post = samplePost()
+        post.hook = "  Keep this exactly…\n\nwith punctuation!  \t"
+        post.script = "Line one.\r\nLine two;\n\n  trailing spaces  "
+        post.caption = "Caption with \"quotes\" and apostrophe's."
+        let submission = try store.submit(kind: .post, post: post, series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let reloaded = InboxStore(file: store.file)
+        XCTAssertEqual(reloaded.pending.first(where: { $0.id == submission.id })?.post, post)
+    }
+
     func testMakeIDIsUniqueAndLowercaseAlphanumeric() {
         var seen = Set<String>()
         for _ in 0..<200 {
@@ -71,6 +82,7 @@ final class SubmissionsTests: XCTestCase {
     func testRevisionOfIsStored() throws {
         let store = makeStore()
         let first = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        _ = try store.decide(id: first.id, status: .changesRequested, comment: "Revise this")
         let second = try store.submit(kind: .post, post: samplePost(title: "Better"), series: nil, agent: "claude", note: nil, revisionOf: first.id)
         XCTAssertEqual(second.revisionOf, first.id)
         XCTAssertNotEqual(second.id, first.id)
@@ -106,16 +118,24 @@ final class SubmissionsTests: XCTestCase {
         XCTAssertTrue(store.pending.isEmpty)
     }
 
-    func testValidRevisionOfIsKept() throws {
+    func testUnknownRevisionIsRefused() throws {
         let store = makeStore()
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: "sub_abcdef123456")
-        XCTAssertEqual(submission.revisionOf, "sub_abcdef123456")
-
-        let reloaded = InboxStore(file: store.file)
-        XCTAssertEqual(reloaded.pending.first?.revisionOf, "sub_abcdef123456")
+        XCTAssertThrowsError(try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: "sub_abcdef123456"))
+        XCTAssertTrue(store.pending.isEmpty)
     }
 
-    // MARK: validation
+    func testRevisionRetriesDoNotDuplicateAndCannotFork() throws {
+        let store = makeStore()
+        let first = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        XCTAssertThrowsError(try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: first.id))
+        _ = try store.decide(id: first.id, status: .changesRequested, comment: "Change the title")
+        let revised = try store.submit(kind: .post, post: samplePost(title: "Revised"), series: nil, agent: "claude", note: nil, revisionOf: first.id)
+        let retry = try store.submit(kind: .post, post: samplePost(title: "Revised"), series: nil, agent: "claude", note: nil, revisionOf: first.id)
+        XCTAssertEqual(revised.id, retry.id)
+        XCTAssertEqual(store.pending.count, 1)
+        XCTAssertThrowsError(try store.submit(kind: .post, post: samplePost(title: "Fork"), series: nil, agent: "claude", note: nil, revisionOf: first.id))
+        XCTAssertEqual(InboxStore(file: store.file).pending.count, 1)
+    }
 
     func testValidationRejectsMissingPayload() {
         XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: nil, series: nil) }), "Add a post to submit.")

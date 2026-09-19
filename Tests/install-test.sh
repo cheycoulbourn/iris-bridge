@@ -67,4 +67,7 @@ chmod +x "$WORK/claude"
 grep -q '^mcp remove iris -s user$' "$WORK/claude.calls" || { echo "register_mcp: did not clear an older user-scope entry first"; cat "$WORK/claude.calls"; exit 1; }
 grep -q '^mcp add -s user iris -- /x/iris-bridge mcp$' "$WORK/claude.calls" || { echo "register_mcp: did not add at user scope"; cat "$WORK/claude.calls"; exit 1; }
 
+cp "$WORK/claude" "$WORK/codex"
+( IRIS_BRIDGE_INSTALL_SOURCED=1 . "$HERE/install.sh"; BIN="/x/iris-bridge"; register_codex_mcp "$WORK/codex" ) >/dev/null
+grep -q '^mcp add iris -- /x/iris-bridge mcp$' "$WORK/claude.calls"
 echo "install-test: ok"

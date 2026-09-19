@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased (0.2.3)
+
+- Connected apps can discover the signed-in provider's models and supported reasoning efforts through an authenticated catalog endpoint. Codex uses its app-server catalog; Claude uses its SDK initialization response. No hardcoded account model list or invented effort capabilities.
+- Optional model/effort choices are validated and passed as separate CLI arguments. Automatic leaves both at provider defaults. Catalog subprocesses have time/output bounds and no chat prompt is sent.
+- Mac discovery advertises the actual network hostname separately from its display name.
+- Installer registers Iris MCP with Codex as well as Claude; imported creator text preserves whitespace and line breaks; revision retries preserve lineage, reject conflicting duplicates and roll back failed persistence.
+
+- The MCP revision response now reports the existing decision status when an idempotent retry returns a
+  revision that was already approved, denied or marked for changes, instead of saying it is still waiting.
+- Claude Code and Codex registration, new-session requirements, verbatim import handling, clarification
+  questions and explicit revision behavior are documented in the README.
+
 ## 0.2.2
 
 Run the install command again to pick all of this up.

@@ -10,17 +10,30 @@ Then open Iris, choose this Mac under "Macs nearby", and enter the code shown in
 
 Commands: `iris-bridge pair`, `iris-bridge status`, `iris-bridge devices`, `iris-bridge revoke <id>`, `iris-bridge inbox`, `iris-bridge uninstall`.
 
-## Send work to Iris from Claude Code
+## Model and reasoning choices (unreleased 0.2.3)
 
-Iris Bridge also hands Claude Code a set of tools for sending finished work to your Iris Inbox. The
-installer registers them for you, in every folder. **Start a new Claude Code session after installing** — a
-session that was already open will not see them.
+In a compatible Iris app, open the model dropdown beside Send. It shows models and reasoning choices reported by the provider connected to this Mac. Codex and Claude maintain their own lists; changing models clears an effort the new model does not support. Automatic uses the provider default. If the Mac cannot provide its list, Automatic remains available and the app can refresh later.
+
+Catalog discovery does not send a chat prompt. The authenticated protocol, bounded discovery, cache behavior and test evidence are recorded in [model-catalog-verification.md](docs/model-catalog-verification.md). This source has not yet been released; the public install command still downloads the current published release.
+
+## Send work to Iris from Claude Code or Codex
+
+Iris Bridge also hands Claude Code and Codex a set of tools for sending finished work to your Iris Inbox. The
+installer registers the tools automatically for the signed-in provider. Claude Code gets a user-scoped
+registration in every folder; Codex gets its global MCP registration. **Start a new Claude Code or Codex
+session after installing** — a session that was already open will not see newly registered tools.
 
 Then ask for work the way you would ask a person:
 
 > Plan a 4-episode series for my anchor pillar and send it to Iris.
 
 > Read brief.md and plan it as posts for Iris.
+
+The tool instructions tell the agent to call `iris_get_workspace_context` first, use the existing pillar,
+platform and format names, and copy imported creator writing exactly. It must preserve punctuation, spacing,
+line breaks and facts rather than paraphrasing or shortening them. When a field, date, owner or merge target
+is ambiguous, it asks a clarification question before importing. For requested changes, it reads existing
+submissions and uses `iris_revise_submission` with the original id; it does not create a new submission.
 
 If the tools are missing (`claude mcp list` does not show `iris`), register them by hand. The `-s user` matters:
 without it Claude Code only adds them to the one folder you ran the command in.

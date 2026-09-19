@@ -22,6 +22,10 @@ public struct MessageRequest: Codable {
     public var skills: [String]?
     public var documents: [String]?
     public var images: [ImageAttachment]?
+    /// Nil keeps the provider's configured default model.
+    public var model: String?
+    /// Nil is Automatic. A selected effort must be one the provider advertised for the selected model.
+    public var effort: String?
     public var planMode: Bool?
     public var today: String?
 }
@@ -35,6 +39,18 @@ public enum MessageValidation {
         let text = request.message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, request.message.count <= 24_000 else { throw BridgeError.message("Enter a message under 24,000 characters.") }
         if let id = request.id, id.count > 100 { throw BridgeError.message("Invalid request identifier.") }
+        if let model = request.model {
+            guard !model.isEmpty, model.count <= 120, !model.hasPrefix("-"),
+                  model.unicodeScalars.allSatisfy({ !$0.properties.isWhitespace && $0.value >= 0x20 && $0.value != 0x7F }) else {
+                throw BridgeError.message("Choose a valid model identifier.")
+            }
+        }
+        if let effort = request.effort {
+            guard !effort.isEmpty, effort.count <= 32,
+                  effort.unicodeScalars.allSatisfy({ $0.value >= 0x30 && $0.value <= 0x39 || $0.value >= 0x61 && $0.value <= 0x7A || $0 == "_" || $0 == "-" }) else {
+                throw BridgeError.message("Choose a valid reasoning effort.")
+            }
+        }
         let images = request.images ?? []
         guard images.count <= 4 else { throw BridgeError.message("Choose up to four images.") }
         for image in images {

@@ -13,6 +13,12 @@ private final class FakeGenerator: Generator {
                              auth: "subscription", account: "chey@example.com", model: "codex-stub")
             : ProviderStatus(provider: provider, ready: false, message: "Install Claude Code on your Mac first.")
     }
+    func models(_ provider: String) -> ProviderModelCatalog {
+        guard provider == "codex" else {
+            return ProviderModelCatalog(provider: provider, models: [], source: "unavailable", notice: "Install Claude Code on your Mac first.")
+        }
+        return ProviderModelCatalog(provider: "codex", models: [ProviderModel(id: "codex-stub", name: "Codex Stub", efforts: ["low", "medium", "high"], defaultEffort: "medium")], source: "live-codex-app-server", defaultModelID: "codex-stub")
+    }
     func cancel(_ id: String) { canceled.append(id) }
 }
 
@@ -102,6 +108,21 @@ final class RouterTests: XCTestCase {
         let (status, body) = send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: "wrong")
         XCTAssertEqual(status, 401); XCTAssertEqual(body["error"] as? String, "device-revoked")
         XCTAssertEqual(generator.calls, 0)
+    }
+    func testModelsRequiresDeviceTokenAndReturnsTheCatalog() {
+        XCTAssertEqual(send("GET", "/models?provider=codex").0, 401)
+        let (status, body) = send("GET", "/models?provider=codex", auth: token)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(body["provider"] as? String, "codex")
+        XCTAssertEqual(body["source"] as? String, "live-codex-app-server")
+        XCTAssertEqual(body["defaultModelID"] as? String, "codex-stub")
+        let model = (body["models"] as? [[String: Any]])?.first
+        XCTAssertEqual(model?["id"] as? String, "codex-stub")
+        XCTAssertEqual(model?["efforts"] as? [String], ["low", "medium", "high"])
+    }
+    func testModelsRejectsAnUnknownProvider() {
+        XCTAssertEqual(send("GET", "/models", auth: token).0, 400)
+        XCTAssertEqual(send("GET", "/models?provider=other", auth: token).0, 400)
     }
     func testPairIssuesTokenAndInvalidatesCode() {
         _ = pairing.issue()

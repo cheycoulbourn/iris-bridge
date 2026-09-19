@@ -10,6 +10,7 @@ public final class LiveGenerator: Generator {
         return try providers.generate(request)
     }
     public func status(_ provider: String) -> ProviderStatus { providers.status(provider) }
+    public func models(_ provider: String) -> ProviderModelCatalog { providers.models(provider) }
     public func cancel(_ id: String) { runner.markCanceled(id) }
 }
 

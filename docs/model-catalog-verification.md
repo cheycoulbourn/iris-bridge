@@ -95,3 +95,14 @@ IRIS_BRIDGE_LIVE_CATALOG=1 xcrun xctest -XCTest ProvidersTests/testLiveCatalogDi
 
 This test asserts only provider identity, nonempty catalog, and unique IDs; it
 does not print models, account data, credentials, prompts, or responses.
+
+## Release record
+
+Iris Bridge 0.2.3 was released on 2026-09-19. Tag `v0.2.3` resolves to
+commit `137e00574c902ae3bae8537ec2ecb8777bce59ed`. The universal macOS
+binary was signed with Developer ID Application: Cheyenne Coulbourn
+(`2S27MSM8G8`) and Apple notarization submission
+`62fad1d0-34ab-4786-9d6f-a877803ae4b8` completed with status Accepted.
+
+The published `iris-bridge-0.2.3-macos.tar.gz` and its uploaded checksum file
+both verify SHA-256 `61e5f3fa5456ec94d85ea8ea1d3f15dc44905448b5c4acf9e09e9d87b7c370f7`.

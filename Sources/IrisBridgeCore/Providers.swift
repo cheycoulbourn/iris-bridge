@@ -96,6 +96,8 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
 public struct ProviderStatus: Codable, Equatable {
     public var provider: String; public var ready: Bool; public var message: String
     public var auth: String?; public var account: String?; public var model: String?
+    /// The plan the sign-in carries ("Max"), when the provider says. Health reports it as `account`.
+    public var plan: String?
 }
 
 public struct ProviderModel: Codable, Equatable {
@@ -211,11 +213,15 @@ public final class ProviderService: @unchecked Sendable {
     private let now: () -> Date
     private var statusCache: [String: (Date, ProviderStatus)] = [:]
     private var catalogCache: [String: (Date, ProviderModelCatalog)] = [:]
+    /// `--version` per resolved binary, kept until the file on disk changes.
+    private var versions: [String: (modified: Date?, version: String)] = [:]
+    private let usage: UsageMemory
     private let lock = NSLock()
     public init(runner: ProcessRunner, executableLookup: @escaping (String) -> String? = ProviderService.findExecutable,
                 catalogLookup: @escaping (String, String) throws -> ProviderModelCatalog = ProviderService.discoverCatalog,
                 now: @escaping () -> Date = Date.init) {
         self.runner = runner; lookup = executableLookup; self.catalogLookup = catalogLookup; self.now = now
+        usage = UsageMemory(now: now)
     }
     public static func findExecutable(_ provider: String) -> String? {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -237,6 +243,32 @@ public final class ProviderService: @unchecked Sendable {
         lock.lock(); statusCache[provider] = (now(), fresh); lock.unlock()
         return fresh
     }
+    /// The health card for one provider (contract §2). Sign-in comes from the cached status check; the CLI
+    /// version is read, never changed (D4); usage comes from what the last turn said (contract §4).
+    public func health(_ provider: String) -> ProviderHealth {
+        guard let binary = lookup(provider) else {
+            return ProviderHealth(installed: false, signedIn: false, account: "", cliVersion: "", usage: .unknown)
+        }
+        let signIn = status(provider)
+        let remembered = usage.current(provider)
+        return ProviderHealth(installed: true, signedIn: signIn.ready, account: signIn.ready ? (signIn.plan ?? "") : "",
+                              cliVersion: cliVersion(binary: binary), usage: remembered.usage,
+                              resetsAt: remembered.resetsAt, lastErrorCause: remembered.lastErrorCause)
+    }
+
+    /// `--version`, asked once per binary and again only when the file behind it changes, so an update the
+    /// owner makes shows up without the helper running the CLI on every status poll.
+    func cliVersion(binary: String) -> String {
+        let resolved = URL(fileURLWithPath: binary).resolvingSymlinksInPath().path
+        let modified = (try? FileManager.default.attributesOfItem(atPath: resolved))?[.modificationDate] as? Date
+        lock.lock()
+        if let cached = versions[resolved], cached.modified == modified { lock.unlock(); return cached.version }
+        lock.unlock()
+        let output = (try? runner.run([binary, "--version"], input: nil, cwd: nil, timeout: 5, requestID: nil)).map { $0.stdout + $0.stderr } ?? ""
+        let version = ProviderHealth.version(from: output)
+        lock.lock(); versions[resolved] = (modified, version); lock.unlock()
+        return version
+    }
     private func checkStatus(_ provider: String) -> ProviderStatus {
         guard let binary = lookup(provider) else {
             return ProviderStatus(provider: provider, ready: false, message: "Install \(provider == "claude" ? "Claude Code" : "Codex") on your Mac first.")
@@ -250,7 +282,7 @@ public final class ProviderService: @unchecked Sendable {
                 let ready = result.status == 0 && (auth["loggedIn"] as? Bool ?? false) && !((auth["subscriptionType"] as? String) ?? "").isEmpty && !["api_key", "apiKey"].contains(method)
                 let plan = (auth["subscriptionType"] as? String ?? "Claude").capitalized
                 return ProviderStatus(provider: provider, ready: ready, message: ready ? "Signed in with Claude \(plan). Your plan limits and extra-usage settings apply." : failure,
-                                      auth: ready ? "subscription" : "unavailable", account: auth["email"] as? String)
+                                      auth: ready ? "subscription" : "unavailable", account: auth["email"] as? String, plan: ready ? plan : nil)
             }
             let ready = result.status == 0 && (result.stdout + result.stderr).lowercased().contains("chatgpt")
             return ProviderStatus(provider: provider, ready: ready, message: ready ? "Signed in with ChatGPT. Your plan limits apply." : failure, auth: ready ? "subscription" : "unavailable")
@@ -425,7 +457,26 @@ public final class ProviderService: @unchecked Sendable {
         guard let catalog = claudeCatalog(from: result) else { throw BridgeError.timeout }
         return catalog
     }
+    /// One chat turn. Its outcome is what health reports about usage: a success clears a remembered limit,
+    /// a failure names its cause, and a timeout or cancel becomes the same `ProviderFailure` shape.
     public func generate(_ request: MessageRequest) throws -> [String: Any] {
+        do {
+            let output = try runTurn(request)
+            usage.recordSuccess(request.provider)
+            return output
+        } catch let failure as ProviderFailure {
+            usage.recordFailure(failure)
+            throw failure
+        } catch BridgeError.timeout {
+            let failure = ProviderFailure(cause: .timeout, provider: request.provider)
+            usage.recordFailure(failure)
+            throw failure
+        } catch BridgeError.canceled {
+            throw ProviderFailure(cause: .cancelled, provider: request.provider)
+        }
+    }
+
+    private func runTurn(_ request: MessageRequest) throws -> [String: Any] {
         let provider = request.provider
         let health = status(provider)
         // A missing CLI and a signed-out one need different fixes, so they are different causes. The status

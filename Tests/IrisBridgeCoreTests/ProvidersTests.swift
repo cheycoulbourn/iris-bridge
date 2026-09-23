@@ -451,4 +451,65 @@ final class ProvidersTests: XCTestCase {
             XCTAssertEqual(failure?.sentence(), "Install Claude Code on your Mac first.")
         }
     }
+
+    // MARK: - Health (contract §2 and §4)
+
+    func testHealthReportsInstalledSignedInPlanAndCLIVersion() {
+        let runner = FakeRunner { args, _ in
+            if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai","email":"e@x.com"}"#) }
+            if args.contains("--version") { return result("2.1.274 (Claude Code)") }
+            return result()
+        }
+        let health = ProviderService(runner: runner, executableLookup: { _ in "/tool" }).health("claude")
+        XCTAssertEqual(health, ProviderHealth(installed: true, signedIn: true, account: "Max", cliVersion: "2.1.274", usage: .unknown))
+    }
+
+    func testHealthForAMissingCLIRunsNothing() {
+        let runner = FakeRunner { _, _ in result() }
+        let health = ProviderService(runner: runner, executableLookup: { _ in nil }).health("codex")
+        XCTAssertEqual(health, ProviderHealth(installed: false, signedIn: false, account: "", cliVersion: "", usage: .unknown))
+        XCTAssertTrue(runner.calls.isEmpty)
+    }
+
+    func testTheCLIVersionIsAskedOncePerBinary() {
+        let runner = FakeRunner { args, _ in args.contains("--version") ? result("codex-cli 0.155.0-alpha.9.2") : result(stderr: "Logged in using ChatGPT") }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" })
+        XCTAssertEqual(service.health("codex").cliVersion, "0.155.0-alpha.9.2")
+        XCTAssertEqual(service.health("codex").cliVersion, "0.155.0-alpha.9.2")
+        XCTAssertEqual(runner.calls.filter { $0.contains("--version") }.count, 1)
+    }
+
+    func testATurnsOutcomeShowsInHealth() {
+        var turn = Fixture.result("codex-usage-limit")
+        let runner = FakeRunner { args, _ in
+            if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
+            if args.contains("--version") { return result("codex-cli 0.155.0-alpha.9.2") }
+            return turn
+        }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, now: { Date(timeIntervalSince1970: 1_790_133_024) })
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "codex", message: "Hi")))
+        var health = service.health("codex")
+        XCTAssertEqual(health.usage, .limited)
+        XCTAssertNotNil(health.resetsAt)
+        XCTAssertEqual(health.lastErrorCause, .usageLimit)
+        turn = result(lines([["type": "item.completed", "item": ["type": "agent_message", "text": #"{"reply":"Ready","proposal":null}"#]], ["type": "turn.completed"]]))
+        XCTAssertNoThrow(try service.generate(MessageRequest(provider: "codex", message: "Hi")))
+        health = service.health("codex")
+        XCTAssertEqual(health.usage, .ok)
+        XCTAssertNil(health.resetsAt)
+        XCTAssertNil(health.lastErrorCause)
+    }
+
+    func testATimedOutTurnIsATimeoutFailureAndShowsInHealth() {
+        let runner = FakeRunner { args, _ in
+            if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
+            if args.contains("--version") { return result("codex-cli 0.155.0-alpha.9.2") }
+            throw BridgeError.timeout
+        }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" })
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "codex", message: "Hi"))) { error in
+            XCTAssertEqual((error as? ProviderFailure)?.cause, .timeout)
+        }
+        XCTAssertEqual(service.health("codex").lastErrorCause, .timeout)
+    }
 }

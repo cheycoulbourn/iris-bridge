@@ -6,6 +6,7 @@ public struct RequestContext { public var sourceAddress: String; public var isLo
 public protocol Generator {
     func generate(_ request: MessageRequest) throws -> [String: Any]
     func status(_ provider: String) -> ProviderStatus
+    func health(_ provider: String) -> ProviderHealth
     func models(_ provider: String) -> ProviderModelCatalog
     func cancel(_ id: String)
 }

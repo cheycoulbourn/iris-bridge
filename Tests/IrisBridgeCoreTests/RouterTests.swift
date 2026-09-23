@@ -13,6 +13,12 @@ private final class FakeGenerator: Generator {
                              auth: "subscription", account: "chey@example.com", model: "codex-stub")
             : ProviderStatus(provider: provider, ready: false, message: "Install Claude Code on your Mac first.")
     }
+    func health(_ provider: String) -> ProviderHealth {
+        provider == "codex"
+            ? ProviderHealth(installed: true, signedIn: true, account: "Pro", cliVersion: "0.155.0-alpha.9.2", usage: .limited,
+                             resetsAt: Date(timeIntervalSince1970: 1_790_426_460), lastErrorCause: .usageLimit)
+            : ProviderHealth(installed: false, signedIn: false, account: "", cliVersion: "", usage: .unknown)
+    }
     func models(_ provider: String) -> ProviderModelCatalog {
         guard provider == "codex" else {
             return ProviderModelCatalog(provider: provider, models: [], source: "unavailable", notice: "Install Claude Code on your Mac first.")

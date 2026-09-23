@@ -113,6 +113,33 @@ final class IrisReadToolsTests: XCTestCase {
         XCTAssertEqual(inbox.last?["comment"], "Make it three episodes.")
     }
 
+    /// The snapshot reader fills a missing title, platform or format with "". Before this was fixed, such a post
+    /// hit a force-unwrap in iris_find_duplicate_posts and took down iris-bridge serve.
+    func testPostsWithAnEmptyTitlePlatformOrFormatAreNeverDuplicatesAndDoNotCrash() throws {
+        guard case .object(var snapshot) = SnapshotFixture.json, case .array(var posts)? = snapshot["posts"] else { return XCTFail("fixture shape") }
+        func post(_ number: Int, removing missing: String? = nil, setting blank: String? = nil) -> JSONValue {
+            var body: [String: JSONValue] = ["id": .string(String(format: "C0000000-0000-4000-8000-%012d", 100 + number)), "revision": "r-x",
+                                             "title": "Untitled reel", "stage": "drafted", "pillar": "Slow mornings", "platform": "Instagram",
+                                             "format": "Reel", "date": "2026-10-09", "archived": false, "hook": "", "script": "", "caption": "",
+                                             "cta": "", "notes": "", "scenes": []]
+            if let missing { body.removeValue(forKey: missing) }
+            if let blank { body[blank] = "" }
+            return .object(body)
+        }
+        posts += [post(1, removing: "format"), post(2, removing: "format"),
+                  post(3, setting: "title"), post(4, setting: "title"),
+                  post(5, removing: "title"), post(6, setting: "platform"), post(7, setting: "platform"),
+                  post(8, setting: "format")]
+        snapshot["posts"] = .array(posts)
+        XCTAssertNil(store.push(profileId: SnapshotFixture.profile, revision: "rev-2", snapshot: .object(snapshot)))
+
+        let groups = call("iris_find_duplicate_posts")["candidates"]?.arrayValue ?? []
+        XCTAssertEqual(groups.map { $0["title"] }, ["Glazing day"], "posts missing a title, platform or format are left out")
+        XCTAssertEqual(call("iris_list_posts")["total"]?.intValue, 12, "posts with an empty field are still listed")
+        XCTAssertEqual(call("iris_list_posts", ["text": "untitled"])["total"]?.intValue, 5)
+        XCTAssertEqual(call("iris_search", ["text": "untitled"])["posts"]?.arrayValue?.count, 5)
+    }
+
     func testAnOlderAppsContextAnswersWithANote() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

@@ -60,7 +60,7 @@ public struct IrisReadTools {
             let archived = arguments["includeArchived"]?.boolValue ?? false
             let ideas = snapshot.ideas.filter { idea in
                 (archived || !idea.archived) && (pillar == nil || idea.pillar == pillar)
-                    && (text == nil || Self.folded(idea.title + "\n" + idea.note)!.contains(text!))
+                    && (text == nil || (Self.folded(idea.title + "\n" + idea.note) ?? "").contains(text!))
             }
             return ["ideas": .array(ideas.map(Self.idea))]
         case "iris_list_series":
@@ -111,7 +111,7 @@ public struct IrisReadTools {
                 && (from == nil || (!post.date.isEmpty && post.date >= from!)) && (to == nil || (!post.date.isEmpty && post.date <= to!))
                 && Self.matches(arguments["stage"], post.stage) && Self.matches(arguments["pillar"], post.pillar)
                 && Self.matches(arguments["platform"], post.platform) && Self.matches(arguments["seriesID"], post.seriesID ?? "")
-                && (text == nil || Self.folded([post.title, post.hook, post.script, post.caption, post.notes].joined(separator: "\n"))!.contains(text!))
+                && (text == nil || (Self.folded([post.title, post.hook, post.script, post.caption, post.notes].joined(separator: "\n")) ?? "").contains(text!))
         }.sorted { ($0.date, $0.time ?? "", $0.id) > ($1.date, $1.time ?? "", $1.id) }
         guard offset <= matching.count else { throw BridgeError.message("That offset is past the end of the matching posts.") }
         let end = min(matching.count, offset + limit)
@@ -127,7 +127,7 @@ public struct IrisReadTools {
             !task.archived && (status == "all" || (status == "done") == task.done)
                 && (from == nil || (task.dueDate ?? "") >= from!) && (to == nil || (task.dueDate.map { $0 <= to! } ?? false))
                 && Self.matches(arguments["postID"], task.postID ?? "")
-                && (text == nil || Self.folded(task.title + "\n" + task.notes)!.contains(text!))
+                && (text == nil || (Self.folded(task.title + "\n" + task.notes) ?? "").contains(text!))
         }
         return ["tasks": .array(tasks.map(Self.task))]
     }
@@ -157,7 +157,7 @@ public struct IrisReadTools {
         guard let text = Self.folded(arguments["text"]?.stringValue), !text.isEmpty else { throw BridgeError.message("Give the words to find.") }
         let kinds = Set((arguments["kinds"]?.arrayValue ?? []).compactMap(\.stringValue))
         func wanted(_ kind: String) -> Bool { kinds.isEmpty || kinds.contains(kind) }
-        func hit(_ parts: [String]) -> Bool { Self.folded(parts.joined(separator: "\n"))!.contains(text) }
+        func hit(_ parts: [String]) -> Bool { (Self.folded(parts.joined(separator: "\n")) ?? "").contains(text) }
         var body: [String: JSONValue] = [:]
         if wanted("post") { body["posts"] = .array(snapshot.posts.filter { !$0.archived && hit([$0.title, $0.hook, $0.script, $0.caption, $0.notes]) }.prefix(50).map(Self.brief)) }
         if wanted("task") { body["tasks"] = .array(snapshot.tasks.filter { !$0.archived && hit([$0.title, $0.notes]) }.prefix(50).map(Self.task)) }
@@ -167,8 +167,9 @@ public struct IrisReadTools {
     }
 
     private func duplicates(_ snapshot: IrisSnapshot) -> [String: JSONValue] {
+        // A post with an empty title, platform or format has no key and is never a candidate.
         func key(_ post: IrisSnapshot.Post) -> String? {
-            let parts = [post.title, post.platform, post.format].map { Self.folded($0)!.split(whereSeparator: \.isWhitespace).joined(separator: " ") }
+            let parts = [post.title, post.platform, post.format].map { (Self.folded($0) ?? "").split(whereSeparator: \.isWhitespace).joined(separator: " ") }
             return parts.allSatisfy { !$0.isEmpty } ? parts.joined(separator: "\u{1F}") : nil
         }
         let groups = Dictionary(grouping: snapshot.posts.filter { !$0.archived && key($0) != nil }, by: { key($0)! })

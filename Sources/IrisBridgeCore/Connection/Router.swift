@@ -18,6 +18,8 @@ public final class Router: @unchecked Sendable {
     private let inbox: InboxStore, contextStore: ContextStore
     private let now: () -> Date
     private let pairLimiter: RateLimiter
+    /// The v3 tool path for `iris-bridge mcp` (`POST /admin/v3/tool`). Nil only in tests that never call a tool.
+    private let tools: ToolService?
     private let lock = NSLock()
     private var completed: [String: (Date, [String: Any])] = [:]
     private var running = false
@@ -25,8 +27,8 @@ public final class Router: @unchecked Sendable {
 
     public init(fingerprint: String, hostName: String, adminToken: String, devices: DeviceStore, pairing: PairingCodeStore,
                 inbox: InboxStore, context contextStore: ContextStore, generator: Generator, log: BridgeLog?,
-                now: @escaping () -> Date = Date.init) {
-        self.fingerprint = fingerprint; self.hostName = hostName; self.adminToken = adminToken
+                tools: ToolService? = nil, now: @escaping () -> Date = Date.init) {
+        self.fingerprint = fingerprint; self.hostName = hostName; self.adminToken = adminToken; self.tools = tools
         self.devices = devices; self.pairing = pairing; self.generator = generator; self.log = log; self.now = now
         self.inbox = inbox; self.contextStore = contextStore
         pairLimiter = RateLimiter(limit: 10, per: 60, now: now)
@@ -190,6 +192,8 @@ public final class Router: @unchecked Sendable {
             let id = String(path.dropFirst("/admin/devices/".count))
             return (try? devices.revoke(id: id)) == true ? HTTPResponse(status: 200, json: ["revoked": id]) : HTTPResponse(status: 404, error: "unknown-device")
         case ("POST", "/admin/inbox"): return adminSubmit(request)
+        case ("POST", "/admin/v3/tool"):
+            return tool(request)
         case ("POST", "/admin/inbox/prune"):
             // `iris-bridge inbox clear-decided`. Thirty days is the same window `all(since:)` shows by
             // default, so pruning never takes away something the app would still have listed.
@@ -208,6 +212,21 @@ public final class Router: @unchecked Sendable {
             return Self.encoded(200, current)
         default: return HTTPResponse(status: 404, error: "Not found")
         }
+    }
+
+    /// `iris-bridge mcp`'s one route: `{name, arguments, threadId?, turnId?, agent}` in, the MCP `tools/call` result out.
+    private func tool(_ request: HTTPRequest) -> HTTPResponse {
+        guard let tools else { return HTTPResponse(status: 404, error: "Not found") }
+        guard let body = try? JSONValue.decode(request.body), let name = body["name"]?.stringValue, !name.isEmpty else {
+            return HTTPResponse(status: 400, error: "Could not read that tool call.")
+        }
+        let threadId = body["threadId"]?.stringValue, turnId = body["turnId"]?.stringValue
+        if let threadId, !StreamIdentifiers.isThreadID(threadId) { return HTTPResponse(status: 400, error: "Could not read that tool call.") }
+        if let turnId, !StreamIdentifiers.isToken(turnId) { return HTTPResponse(status: 400, error: "Could not read that tool call.") }
+        let agent = OneLineText.clean(body["agent"]?.stringValue ?? "agent", limit: 80)
+        let result = tools.call(name: name, arguments: body["arguments"]?.objectValue ?? [:], threadId: threadId, turnId: turnId,
+                                agent: agent.isEmpty ? "agent" : agent)
+        return HTTPResponse(status: 200, data: result.json.encoded())
     }
 
     public static let notPairedSentence = "Iris is not connected to this Mac yet. Ask the creator to run `iris-bridge pair` in Terminal, then open Iris, choose this Mac under Macs nearby and enter the code. Try again once they have."

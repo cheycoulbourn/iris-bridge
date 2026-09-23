@@ -325,6 +325,31 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(context.current?.updatedAt.timeIntervalSince1970 ?? 0, 1789588800.123, accuracy: 0.002)
     }
 
+    // MARK: - Tools
+
+    /// `iris-bridge mcp`'s one route answers only this Mac with the admin token, and returns the tool result.
+    func testTheToolRouteNeedsLoopbackAndTheAdminToken() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let snapshots = SnapshotStore(folder: dir.appendingPathComponent("snapshots"), legacy: context)
+        final class NoTurns: TurnContextProvider { func turnContext(threadId: String) -> TurnContext? { nil } }
+        let turns = NoTurns()
+        let tools = ToolService(reads: IrisReadTools(snapshots: snapshots, hasPairedDevices: { true }),
+                                relay: ActionRelay(file: dir.appendingPathComponent("actions.json"), log: nil),
+                                approvals: ApprovalBroker(turns: turns, log: nil), snapshots: snapshots, turns: turns)
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: generator, log: nil, tools: tools)
+        let body = #"{"name":"iris_workspace_summary","arguments":{},"agent":"claude-code"}"#
+        XCTAssertEqual(send("POST", "/admin/v3/tool", body: body, auth: "admin-secret", loopback: false).0, 404)
+        XCTAssertEqual(send("POST", "/admin/v3/tool", body: body, auth: token, loopback: true).0, 401)
+        let (status, reply) = send("POST", "/admin/v3/tool", body: body, auth: "admin-secret", loopback: true)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(reply["isError"] as? Bool, true)
+        XCTAssertEqual(((reply["content"] as? [[String: Any]])?.first?["text"] as? String), IrisReadTools.noSnapshot)
+        XCTAssertEqual(send("POST", "/admin/v3/tool", body: #"{"arguments":{}}"#, auth: "admin-secret", loopback: true).0, 400)
+        XCTAssertEqual(send("POST", "/admin/v3/tool", body: #"{"name":"x","threadId":"../x"}"#, auth: "admin-secret", loopback: true).0, 400)
+    }
+
     // MARK: - Admin inbox
 
     func testAdminSubmitNeedsLoopbackAndAdminTokenThenValidates() {

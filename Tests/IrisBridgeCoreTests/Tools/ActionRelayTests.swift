@@ -31,7 +31,12 @@ final class IrisChangeToolsTests: XCTestCase {
         XCTAssertEqual(IrisChangeTools.result(["status": "ok", "recordIDs": ["r1"], "activityID": "act:x"]).isError, false)
         XCTAssertTrue(IrisChangeTools.result(["status": "queued_for_review", "itemID": "item_1"]).text.contains("item_1"))
         XCTAssertEqual(IrisChangeTools.result(["status": "refused", "message": "That task is not in this workspace."]), .failure("That task is not in this workspace."))
-        XCTAssertTrue(IrisChangeTools.queued(actionId: "act_9").text.contains("queued_until_iris_connects"))
+        let queued = IrisChangeTools.queued(actionId: "act_9").text
+        XCTAssertTrue(queued.contains("queued_until_iris_connects"))
+        // Every Iris build before the new chat is open without receiving changes, so the note must not say Iris is closed.
+        XCTAssertFalse(queued.contains("not open on a paired device."), queued)
+        XCTAssertTrue(queued.contains("Older Iris builds do not receive agent changes"), queued)
+        XCTAssertTrue(queued.contains("up to a week"), queued)
         XCTAssertEqual(IrisChangeTools.origin(agent: "claude", threadId: "T", turnId: "t1"), ["source": "chat", "agent": "claude", "threadID": "T", "turnID": "t1"])
         XCTAssertEqual(IrisChangeTools.origin(agent: "codex", threadId: nil, turnId: nil), ["source": "agent", "agent": "codex"])
     }

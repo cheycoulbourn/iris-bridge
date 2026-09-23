@@ -81,14 +81,16 @@ Reading, from the workspace your Iris app last shared with this Mac (every answe
 
 Changing, always through the Iris app: `iris_create_task`, `iris_update_task`, `iris_complete_task`,
 `iris_create_idea`, `iris_update_idea`, `iris_create_post_draft`, `iris_update_post_draft` and
-`iris_attach_to_post` apply at once, with Undo in Activity; `iris_schedule_post`, `iris_set_stage` past editing,
-`iris_mark_posted`, `iris_archive` and `iris_create_series` wait in the Inbox for your approval, and so does
-anything for a profile other than the one open in Iris. `iris_revise_review_item` replaces an Inbox item you
-asked to be changed. Nothing is ever deleted and nothing is published to a platform.
+`iris_attach_to_post` apply as soon as Iris receives them, with Undo in Activity; `iris_schedule_post`,
+`iris_set_stage` past editing, `iris_mark_posted`, `iris_archive` and `iris_create_series` wait in the Inbox for
+your approval, and so does anything for a profile other than the one open in Iris. `iris_revise_review_item`
+replaces an Inbox item you asked to be changed. Nothing is ever deleted and nothing is published to a platform.
 
-A change needs Iris open on a paired iPhone or Mac. When none is, the change waits on this Mac and reaches Iris
-the next time it connects (within a week). The tools from Iris Bridge 0.2 (`iris_submit_post` and the rest) are
-gone; an agent picks up the new ones in its next session.
+A change reaches Iris only through an Iris build with the new chat, open on a paired iPhone or Mac. Older Iris
+builds do not receive agent changes, even while they are open. Until a build with the new chat connects, each
+change waits on this Mac for up to a week; one still waiting after that is dropped. The tools from Iris Bridge
+0.2 (`iris_submit_post` and the rest) are gone, and with them the way older Iris builds received agent work in
+their Inbox; an agent picks up the new tools in its next session.
 
 If the tools are missing (`claude mcp list` does not show `iris`), register them by hand. The `-s user` matters:
 without it Claude Code only adds them to the one folder you ran the command in.

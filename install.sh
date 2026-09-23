@@ -273,8 +273,10 @@ main() {
     note "  2. Claude Code now has the Iris tools in every folder. Start a NEW Claude Code session — one that"
     note "     was already open will not see them — and ask it, for example:"
     note "       \"Read brief.md and plan it as posts for Iris.\""
-    note "  3. Small changes (tasks, ideas, drafts) appear in Iris at once, with Undo in Activity. Posting dates,"
-    note "     archiving and new series wait in the Inbox for your approval. Iris must be open on a paired device."
+    note "  3. Changes reach Iris only through an Iris build with the new chat, open on a paired device. Older"
+    note "     Iris builds do not receive them; until a new build connects, changes wait on this Mac for up to"
+    note "     a week. Small changes (tasks, ideas, drafts) then apply with Undo in Activity; posting dates,"
+    note "     archiving and new series wait in the Inbox for your approval."
   elif [ -n "$CLAUDE_CLI" ]; then
     # The literal $HOME is on purpose: this line is meant to be pasted into a shell, where it expands.
     note "  2. Claude Code could not be given the Iris tools automatically. Run this once:"

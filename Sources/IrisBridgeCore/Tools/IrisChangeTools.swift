@@ -74,6 +74,6 @@ public enum IrisChangeTools {
 
     public static func queued(actionId: String) -> ToolResult {
         .json(["status": "queued_until_iris_connects", "actionId": .string(actionId),
-               "note": "Iris is not open on a paired device. The change waits on this Mac; Iris applies it, or puts it in the Inbox for review, when it next connects."])
+               "note": "Iris has not taken this change yet: no Iris build with the new chat is open on a paired device, or it did not answer in time. Older Iris builds do not receive agent changes. The change waits on this Mac for up to a week; Iris applies it, or puts it in the Inbox for review, when a build with the new chat next connects."])
     }
 }

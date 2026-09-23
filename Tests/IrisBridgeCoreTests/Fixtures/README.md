@@ -1,7 +1,8 @@
 # Provider output fixtures
 
-Each fixture is what a provider CLI printed for one failed turn: `<name>.stdout` (JSON events, one per line)
-and/or `<name>.stderr`. `ProviderOutputTests` and `ProvidersTests` read them through `Fixture.result`.
+Each `.stdout`/`.stderr` fixture is what a provider CLI printed for one failed v2 turn: `<name>.stdout` (JSON
+events, one per line) and/or `<name>.stderr`. `ProviderOutputTests` and `ProvidersTests` read them through
+`Fixture.result`.
 
 | Fixture | Provenance |
 |---|---|
@@ -19,3 +20,15 @@ and/or `<name>.stderr`. `ProviderOutputTests` and `ProvidersTests` read them thr
 
 To re-record, run the CLI the way the helper does while the account is in that state, and redirect its
 stdout and stderr to `<name>.stdout` and `<name>.stderr` here.
+
+## v3 session transcripts (0.3.0)
+
+Each `.jsonl` transcript is one provider session as `ScriptedLauncher` replays it: `{"dir":"in","obj":…}` is a
+line the helper must write next (matched on `type`, and on `request.subtype` for control requests),
+`{"dir":"out","obj":…}` a line the CLI printed, `{"dir":"exit","status":…,"stderr":…}` the CLI exiting. A
+string `"@name.json"` stands for that fixture's JSON. Content is fictional throughout; no account data, email
+or connector content from the owner's Mac is in any of them.
+
+| Fixture | Provenance |
+|---|---|
+| `claude-mcp-status.json` | Shape recorded by spike run q2-f (`mcpServers` with `name`, `status`, `scope`, `source`, `config`, `tools` with Claude Code's `annotations`). Servers are fictional apart from connector and tool names that are public. |

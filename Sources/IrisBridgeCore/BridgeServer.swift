@@ -167,7 +167,16 @@ public final class BridgeServer: @unchecked Sendable {
     private func receive(_ connection: NWConnection, parser: HTTPRequestParser, context: RequestContext, state: ConnectionState) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { [weak self] data, _, complete, error in
             guard let self else { return }
-            if let error { state.finished = true; self.log?.error("receive failed: \(error)"); connection.cancel(); return }
+            if let error {
+                state.finished = true
+                if Self.isPeerDrop(error) {
+                    self.log?.info("connection from \(context.sourceAddress) closed before its request arrived: \(error)")
+                } else {
+                    self.log?.error("receive failed: \(error)")
+                }
+                connection.cancel()
+                return
+            }
             switch parser.feed(data ?? Data()) {
             case .needMore:
                 if complete { state.finished = true; connection.cancel() }
@@ -213,5 +222,19 @@ public final class BridgeServer: @unchecked Sendable {
         let bare = hostDescription.split(separator: "%").first.map(String.init) ?? hostDescription
         let loopback = bare.hasPrefix("127.") || bare == "::1" || bare.hasPrefix("::ffff:127.")
         return RequestContext(sourceAddress: bare, isLoopback: loopback)
+    }
+
+    /// The other end went away: it reset or closed the socket, or ended TLS without saying so. The TLS codes are
+    /// errSSLClosedGraceful (-9805), errSSLClosedAbort (-9806) and errSSLClosedNoNotify (-9816).
+    static func isPeerDrop(_ error: NWError) -> Bool {
+        switch error {
+        case .posix(let code):
+            let drops: [POSIXErrorCode] = [.ECONNRESET, .ENOTCONN, .ECONNREFUSED, .ECONNABORTED, .ECANCELED, .EPIPE, .ETIMEDOUT]
+            return drops.contains(code)
+        case .tls(let status):
+            return [-9805, -9806, -9816].contains(status)
+        default:
+            return false
+        }
     }
 }

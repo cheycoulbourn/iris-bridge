@@ -90,10 +90,10 @@ do {
         printPairingCode(try AdminClient(paths: paths, port: port).pairCode().code)
     case "status":
         let s = try AdminClient(paths: paths, port: port).status()
-        let providers = s["providers"] as? [String: [String: Any]] ?? [:]
-        print("Iris Bridge \(s["helperVersion"] ?? "?") on \(s["hostName"] ?? "?") (port \(port))")
-        for name in ["claude", "codex"] { print("  \(name): \((providers[name]?["ready"] as? Bool) == true ? "signed in" : "not signed in") — \(providers[name]?["message"] ?? "")") }
-        print("  paired devices: \(DeviceStore(file: paths.devices).all.count)")
+        let addresses = [HostName.localHostName()] + HostName.lanAddresses()
+        for printed in StatusReport.lines(status: s, port: port, pairedDevices: DeviceStore(file: paths.devices).all.count, addresses: addresses) {
+            print(printed)
+        }
     case "devices":
         let list = try AdminClient(paths: paths, port: port).devices()
         if list.isEmpty { print("No paired devices. Run `iris-bridge pair`.") }

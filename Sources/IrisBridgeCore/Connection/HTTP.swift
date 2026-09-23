@@ -83,6 +83,13 @@ public final class HTTPRequestParser {
         let body = buffer.subdata(in: bodyStart..<(bodyStart + length))
         return .complete(HTTPRequest(method: method, path: path, headers: headers, body: body))
     }
+
+    /// Bytes that arrived after a complete request. Only an upgraded stream reads them: a WebSocket client may
+    /// send its first frame in the same packet as its upgrade request.
+    public var remainder: Data {
+        guard headParsed, buffer.endIndex >= bodyStart + length else { return Data() }
+        return buffer.subdata(in: (bodyStart + length)..<buffer.endIndex)
+    }
 }
 
 public struct HTTPResponse {

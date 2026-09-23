@@ -26,6 +26,7 @@ public final class BridgeServer: @unchecked Sendable {
 
     private let listener: NWListener
     private let router: Router
+    private let streams: StreamEndpoint?
     private let log: BridgeLog?
     private let queue = DispatchQueue(label: "iris-bridge.server")
     private let work = DispatchQueue(label: "iris-bridge.work", attributes: .concurrent)
@@ -34,8 +35,9 @@ public final class BridgeServer: @unchecked Sendable {
     private var activeConnections = 0
     private var lanConnections = 0
 
-    public init(port: UInt16, identity: BridgeIdentity, router: Router, serviceName: String, advertise: Bool, log: BridgeLog?) throws {
-        self.router = router; self.log = log; self.requestedPort = port
+    public init(port: UInt16, identity: BridgeIdentity, router: Router, serviceName: String, advertise: Bool, log: BridgeLog?,
+                streams: StreamEndpoint? = nil) throws {
+        self.router = router; self.log = log; self.requestedPort = port; self.streams = streams
         let tls = NWProtocolTLS.Options()
         guard let secIdentity = sec_identity_create(identity.secIdentity) else { throw CertificateError.importFailed(-1) }
         sec_protocol_options_set_local_identity(tls.securityProtocolOptions, secIdentity)
@@ -46,7 +48,8 @@ public final class BridgeServer: @unchecked Sendable {
         listener.newConnectionLimit = Self.listenerBudget
         if advertise {
             listener.service = NWListener.Service(name: serviceName, type: "_iris-bridge._tcp", domain: nil,
-                                                  txtRecord: NWTXTRecord(["v": "2", "fp": identity.fingerprint, "name": serviceName, "host": HostName.localHostName()]))
+                                                  txtRecord: NWTXTRecord(["v": "2", "stream": "\(StreamProtocol.version)", "fp": identity.fingerprint,
+                                                                          "name": serviceName, "host": HostName.localHostName()]))
         }
     }
 
@@ -190,11 +193,32 @@ public final class BridgeServer: @unchecked Sendable {
                 self.reply(connection, HTTPResponse(status: 413, error: "This message is too large. Attach fewer files."))
             case .complete(let request):
                 state.finished = true
+                if WebSocketHandshake.wantsStream(request) {
+                    self.upgrade(connection, request: request, remainder: parser.remainder, context: context)
+                    return
+                }
                 self.work.async {
                     let response = self.router.handle(request, context: context)
                     self.reply(connection, response)
                 }
             }
+        }
+    }
+
+    /// `/v3/stream`: answer the upgrade and hand the connection to the stream hub, or refuse it like any
+    /// other bad request. A helper built without streams answers 404, as it did before 0.3.0.
+    private func upgrade(_ connection: NWConnection, request: HTTPRequest, remainder: Data, context: RequestContext) {
+        guard let streams else { reply(connection, HTTPResponse(status: 404, error: "Not found")); return }
+        switch WebSocketHandshake.answer(request) {
+        case .refuse(let response):
+            reply(connection, response)
+        case .upgrade(let head):
+            let socket = WebSocketConnection(connection: connection, context: context, queue: queue, log: log)
+            connection.send(content: head, completion: .contentProcessed { error in
+                guard error == nil else { connection.cancel(); return }
+                streams.attach(socket)
+                socket.start(initial: remainder)
+            })
         }
     }
 

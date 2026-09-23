@@ -8,6 +8,7 @@ let package = Package(
     targets: [
         .target(name: "IrisBridgeCore", swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(name: "IrisBridge", dependencies: ["IrisBridgeCore"], swiftSettings: [.swiftLanguageMode(.v5)]),
-        .testTarget(name: "IrisBridgeCoreTests", dependencies: ["IrisBridgeCore"], swiftSettings: [.swiftLanguageMode(.v5)]),
+        .testTarget(name: "IrisBridgeCoreTests", dependencies: ["IrisBridgeCore"], resources: [.copy("Fixtures")],
+                    swiftSettings: [.swiftLanguageMode(.v5)]),
     ]
 )

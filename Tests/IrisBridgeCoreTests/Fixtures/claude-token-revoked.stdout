@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","model":"claude-fable-5-1","apiKeySource":"none","session_id":"fixture"}
+{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate. API Error: 401 OAuth access token has been revoked.","session_id":"fixture"}

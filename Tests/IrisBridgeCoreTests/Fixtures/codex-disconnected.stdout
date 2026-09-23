@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"fixture"}
+{"type":"turn.started"}
+{"type":"error","message":"stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"}}

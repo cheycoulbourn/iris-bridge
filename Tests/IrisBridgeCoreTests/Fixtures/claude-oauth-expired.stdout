@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","model":"claude-fable-5-1","apiKeySource":"none","session_id":"fixture"}
+{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Failed to authenticate: OAuth session expired and could not be refreshed"}]},"error":"authentication_failed","session_id":"fixture"}
+{"type":"result","subtype":"success","is_error":true,"result":"Failed to authenticate: OAuth session expired and could not be refreshed","session_id":"fixture"}

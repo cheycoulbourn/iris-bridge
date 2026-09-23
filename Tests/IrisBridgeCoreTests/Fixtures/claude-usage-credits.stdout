@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","model":"claude-fable-5-1","apiKeySource":"none","session_id":"fixture"}
+{"type":"assistant","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Fable 5 requires usage credits. Run /usage-credits to continue or switch models with /model."}]},"error":"rate_limit","session_id":"fixture"}
+{"type":"result","subtype":"success","is_error":true,"result":"Fable 5 requires usage credits. Run /usage-credits to continue or switch models with /model.","session_id":"fixture"}

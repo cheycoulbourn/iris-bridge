@@ -10,6 +10,38 @@ Then open Iris, choose this Mac under "Macs nearby", and enter the code shown in
 
 Commands: `iris-bridge pair`, `iris-bridge status`, `iris-bridge devices`, `iris-bridge revoke <id>`, `iris-bridge inbox`, `iris-bridge uninstall`.
 
+## Iris chat on this Mac (0.3.0)
+
+An Iris app with the new chat keeps one secure connection open to this Mac while it is in the foreground
+(`wss://<this Mac>:48731/v3/stream`, the same port, certificate and pairing as before; no device re-pairs).
+Each chat thread has its own Claude Code or Codex session here, started when you open the thread and picked
+up again later, so replies stream as they are written and remember the conversation. Up to three chats can
+answer at once. A reply keeps going if your phone locks, and the app catches up when it reconnects.
+
+In chat, Claude can use the Iris tools and the connectors in your Claude account (Gmail, Google Calendar,
+Notion and the others you have connected at claude.ai). It reads a connector only when your message mentions
+it with `@` or the command you chose allows it, and anything that would send, create or change something
+outside Iris asks you first in the app; no answer within ten minutes means no. It cannot read or change files
+on this Mac, run commands or browse the web. ChatGPT (Codex) gets the Iris tools but no connectors.
+
+If Claude Code's own settings pre-allow a connector tool (`permissions.allow` in `~/.claude/settings.json`),
+that tool never asks. Iris's Settings shows any such rule.
+
+## How it is built
+
+One Swift helper, `Sources/IrisBridgeCore`, in the parts of the Iris Bridge v3 design (§4):
+
+- `Connection/` the TLS listener, the v2 HTTP endpoints, the `/v3/stream` WebSocket and its messages, and the
+  runtime that wires the parts together.
+- `Pairing/` pairing codes and device tokens.
+- `Sessions/` one provider session per chat thread, and each thread's event log for replay.
+- `Providers/` the provider sessions behind one interface: `Claude/` (`claude -p` stream-json, long-lived)
+  and `Codex/` (`codex exec --json`, one run per message); failure causes; the v2 chat turn.
+- `Tools/` the Iris tools (`iris-bridge mcp`), the snapshot they read, and the queue that carries changes to
+  the app, which is the only thing that ever writes your Iris data.
+- `Approvals/` the permission check chat sessions ask before every tool use.
+- `Health/` sign-in, plan, versions, usage and connectors, as the app shows them.
+
 ## When something goes wrong (0.2.5)
 
 Every error Iris Bridge sends back keeps its plain sentence and also says why, so the app can label it:
@@ -29,62 +61,42 @@ In a compatible Iris app, open the model dropdown beside Send. It shows models a
 
 Catalog discovery does not send a chat prompt. The authenticated protocol, bounded discovery, cache behavior and test evidence are recorded in [model-catalog-verification.md](docs/model-catalog-verification.md). Install the latest helper using the public install command above.
 
-## Send work to Iris from Claude Code or Codex
+## Iris tools for Claude Code and Codex
 
-Iris Bridge also hands Claude Code and Codex a set of tools for sending finished work to your Iris Inbox. The
-installer registers the tools automatically for the signed-in provider. Claude Code gets a user-scoped
-registration in every folder; Codex gets its global MCP registration. **Start a new Claude Code or Codex
-session after installing** — a session that was already open will not see newly registered tools.
+Iris Bridge gives Claude Code and Codex the same Iris tools the chat uses. The installer registers them for
+the signed-in provider: Claude Code gets a user-scoped registration in every folder, Codex its global MCP
+registration. **Start a new Claude Code or Codex session after installing**; one that was already open will not
+see new tools.
 
 Then ask for work the way you would ask a person:
 
-> Plan a 4-episode series for my anchor pillar and send it to Iris.
+> Plan a 4-episode series for my anchor pillar.
 
 > Read brief.md and plan it as posts for Iris.
 
-The tool instructions tell the agent to call `iris_get_workspace_context` first, use the existing pillar,
-platform and format names, and copy imported creator writing exactly. It must preserve punctuation, spacing,
-line breaks and facts rather than paraphrasing or shortening them. When a field, date, owner or merge target
-is ambiguous, it asks a clarification question before importing. For requested changes, it reads existing
-submissions and uses `iris_revise_submission` with the original id; it does not create a new submission.
+Reading, from the workspace your Iris app last shared with this Mac (every answer says how old that is):
+`iris_workspace_summary` (call it first), `iris_list_posts`, `iris_get_post`, `iris_list_tasks`,
+`iris_list_ideas`, `iris_list_series`, `iris_list_pillars`, `iris_get_schedule`, `iris_search`,
+`iris_find_duplicate_posts` and `iris_list_review_items`.
+
+Changing, always through the Iris app: `iris_create_task`, `iris_update_task`, `iris_complete_task`,
+`iris_create_idea`, `iris_update_idea`, `iris_create_post_draft`, `iris_update_post_draft` and
+`iris_attach_to_post` apply at once, with Undo in Activity; `iris_schedule_post`, `iris_set_stage` past editing,
+`iris_mark_posted`, `iris_archive` and `iris_create_series` wait in the Inbox for your approval, and so does
+anything for a profile other than the one open in Iris. `iris_revise_review_item` replaces an Inbox item you
+asked to be changed. Nothing is ever deleted and nothing is published to a platform.
+
+A change needs Iris open on a paired iPhone or Mac. When none is, the change waits on this Mac and reaches Iris
+the next time it connects (within a week). The tools from Iris Bridge 0.2 (`iris_submit_post` and the rest) are
+gone; an agent picks up the new ones in its next session.
 
 If the tools are missing (`claude mcp list` does not show `iris`), register them by hand. The `-s user` matters:
 without it Claude Code only adds them to the one folder you ran the command in.
 
     claude mcp add -s user iris -- "$HOME/Library/Application Support/Iris Bridge/bin/iris-bridge" mcp
 
-The tools Claude Code gets:
-
-- `iris_get_workspace_context` — your pillars, platforms, formats, weekly goals and series, so it plans with
-  the names you actually use. It is told to call this first.
-- `iris_submit_post` — sends one planned post for review.
-- `iris_submit_series` — sends a series, one post per episode.
-- `iris_list_submissions` — what it has already sent, with your decisions and comments.
-- `iris_revise_submission` — a replacement for something you asked it to change. The original stays as history.
-- `iris_list_posts` — read saved planner posts for the active account, with search, archived-post filtering and explicit pagination. It returns the snapshot revision and capture time and never changes a post.
-- `iris_get_post` — read one saved post in full, including exact creator text, linked-task and linked-idea metadata, and attachment identity/name/type/size metadata. Binary media is never sent through the bridge.
-- `iris_find_duplicate_posts` — compare active posts by normalized title, platform and format. Its groups are candidates for review, never proof that posts should be merged or removed.
-- `iris_propose_archive_posts` — send up to 100 id-and-revision targets with an account ID, operation ID and reason to Iris for explicit review. The helper requires a matching planner snapshot captured within five minutes, rejects changed or archived targets, and treats an identical operation retry as the same request even after its decision.
-
-**Nothing is saved until you approve it.** Everything the agent sends waits in the Inbox in Ask Iris, where
-you review, edit, approve, deny or request changes. Nothing is ever published to a platform; approving only
-writes the post into your planner.
-
-On the Mac, a new submission notifies you as soon as it arrives. On iPhone, notifications arrive when the
-phone next checks in — in the foreground straight away, in the background every so often. A phone that has
-been locked for hours will not be woken: that needs push through Apple's servers, which is a later build.
-
-Planner cleanup needs a compatible Iris app that refreshes its optional planner snapshot. In Iris, compare
-candidate records, then review each archive proposal individually; approval archives the matching current
-records in the app. The MCP helper has no delete tool, does not merge posts, and cannot approve its own
-proposal. Update the app and rerun the Iris Bridge installer before using these tools with an older helper.
-
-To see what is waiting from Terminal:
-
-    iris-bridge inbox                 # id, kind, title and how long it has been waiting
-    iris-bridge inbox clear-decided   # forget decided submissions older than 30 days
-
-Inbox features need helper 0.2.0 or newer. Older helpers still chat with Iris.
+`iris-bridge inbox` still lists what Iris Bridge 0.2 collected and not yet decided, and
+`iris-bridge inbox clear-decided` forgets decisions older than 30 days.
 
 ## Releasing (maintainers)
 
@@ -94,9 +106,11 @@ Every release is checked against the real Claude Code and Codex before it ships:
     sh Tests/integration.sh
     sh Tests/install-test.sh
     sh Tests/smoke-test.sh      # the smoke script itself, against the stub CLIs
-    sh scripts/smoke.sh         # live: a second helper on a random port, one Claude and one Codex turn
+    sh scripts/smoke.sh         # live: a second helper on a random port, v2 turns and a v3 session per provider
     scripts/release.sh <version>
 
 `scripts/smoke.sh` never touches the installed helper on port 48731. It skips a provider that is not
-installed, is signed out or is at its usage limit. `scripts/release.sh` refuses to tag code that has no
-clean smoke run with at least one live turn.
+installed, is signed out or is at its usage limit. Its v3 session makes one Iris tool call, one approval round
+trip (a Google Calendar event it denies, so nothing is created), a resume after restarting the helper and a
+cancel. `scripts/release.sh` refuses to tag code that has no clean smoke run in which the v2 turn and the three
+Claude v3 steps ran live.

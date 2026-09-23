@@ -457,6 +457,14 @@ public final class ProviderService: @unchecked Sendable {
         guard let catalog = claudeCatalog(from: result) else { throw BridgeError.timeout }
         return catalog
     }
+    /// A v3 turn's outcome, so health says the same thing whichever chat path the turn took. Only what a
+    /// provider said counts; a refused or cancelled message says nothing about the provider.
+    public func recordTurn(_ provider: String, failure: ProviderFailure?) {
+        guard let failure else { usage.recordSuccess(provider); return }
+        guard [.signedOut, .usageLimit, .providerUnavailable, .modelUnavailable, .timeout, .internal].contains(failure.cause) else { return }
+        usage.recordFailure(failure)
+    }
+
     /// One chat turn. Its outcome is what health reports about usage: a success clears a remembered limit,
     /// a failure names its cause, and a timeout or cancel becomes the same `ProviderFailure` shape.
     public func generate(_ request: MessageRequest) throws -> [String: Any] {

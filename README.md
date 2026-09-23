@@ -72,3 +72,18 @@ To see what is waiting from Terminal:
     iris-bridge inbox clear-decided   # forget decided submissions older than 30 days
 
 Inbox features need helper 0.2.0 or newer. Older helpers still chat with Iris.
+
+## Releasing (maintainers)
+
+Every release is checked against the real Claude Code and Codex before it ships:
+
+    swift test --scratch-path /tmp/iris-bridge-build
+    sh Tests/integration.sh
+    sh Tests/install-test.sh
+    sh Tests/smoke-test.sh      # the smoke script itself, against the stub CLIs
+    sh scripts/smoke.sh         # live: a second helper on a random port, one Claude and one Codex turn
+    scripts/release.sh <version>
+
+`scripts/smoke.sh` never touches the installed helper on port 48731. It skips a provider that is not
+installed, is signed out or is at its usage limit. `scripts/release.sh` refuses to tag code that has no
+clean smoke run with at least one live turn.

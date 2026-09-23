@@ -64,6 +64,15 @@ fi
 
 grep -qF "current = \"$VERSION\"" Sources/IrisBridgeCore/Version.swift || { echo "Set BridgeVersion.current to $VERSION first."; exit 1; }
 
+# E4: 0.2.0 and 0.2.2 shipped broken because nothing ran them against a real Claude Code or Codex first.
+# scripts/smoke.sh records the code it checked (Package.swift and Sources) after a clean run with at least one
+# live turn; notes and docs may change after that without a new run.
+CODE_ID=$(git ls-tree -r HEAD -- Package.swift Sources | shasum -a 256 | awk '{print $1}')
+[ -f "/tmp/iris-bridge-smoke/$CODE_ID.ok" ] || {
+    echo "Run sh scripts/smoke.sh on this code first. It checks the helper against the real Claude Code and Codex."
+    exit 1
+}
+
 # Both of these fail slowly and late otherwise: gh at the very last step, notarytool after a full build.
 gh auth status >/dev/null 2>&1 || { echo "gh is not signed in. Run: gh auth login"; exit 1; }
 xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" >/dev/null 2>&1 || {

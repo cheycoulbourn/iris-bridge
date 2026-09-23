@@ -1,243 +1,30 @@
 import XCTest
 @testable import IrisBridgeCore
 
+/// The v2 Inbox store: what helper 0.2.x saved, served to older apps and to `iris-bridge inbox` until phase 6.
 final class SubmissionsTests: XCTestCase {
     private func makeDirectory() -> URL {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir
     }
-    private func makeStore(now: @escaping () -> Date = Date.init) -> InboxStore {
-        InboxStore(file: makeDirectory().appendingPathComponent("inbox.json"), now: now)
-    }
-    private func samplePost(title: String = "Morning routine", pillar: String = "Health", platform: String = "TikTok") -> SubmittedPost {
-        SubmittedPost(title: title, pillar: pillar, platform: platform, format: "Reel", postingDate: "2026-09-20",
-                      hook: "Try this before coffee", script: "Do the thing.", scenes: [SubmittedScene(script: "Wake up", shotNotes: "Wide")],
-                      caption: "A caption", cta: "Follow", notes: nil, seriesName: nil, episode: nil)
-    }
-    private func sampleSeries(episodes: Int = 3) -> SubmittedSeries {
-        SubmittedSeries(name: "Five mornings", pillar: "Health", summary: "A short run",
-                        episodes: (1...episodes).map { SubmittedEpisode(number: $0, date: nil, post: samplePost(title: "Episode \($0)")) })
-    }
-    private func message(_ error: Error) -> String? {
-        guard case .message(let text)? = error as? BridgeError else { return nil }
-        return text
-    }
-
-    // MARK: submit
-
-    func testSubmitReturnsPendingWithIDAndPersists() throws {
-        let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let store = makeStore(now: { now })
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: "Take a look", revisionOf: nil)
-        XCTAssertTrue(submission.id.hasPrefix("sub_"))
-        XCTAssertEqual(submission.id.count, 16)
-        XCTAssertTrue(submission.id.dropFirst(4).allSatisfy { $0.isLowercase && $0.isLetter || $0.isNumber })
-        XCTAssertEqual(submission.status, .pending)
-        XCTAssertEqual(submission.createdAt, now)
-        XCTAssertNil(submission.decidedAt)
-        XCTAssertEqual(submission.agent, "claude")
-        XCTAssertEqual(submission.note, "Take a look")
-        XCTAssertEqual(submission.post, samplePost())
-
-        let attributes = try FileManager.default.attributesOfItem(atPath: store.file.path)
-        XCTAssertEqual(attributes[.posixPermissions] as? Int, 0o600)
-
-        let reloaded = InboxStore(file: store.file, now: { now })
-        XCTAssertEqual(reloaded.pending.map(\.id), [submission.id])
-        XCTAssertEqual(reloaded.pending.first?.post, samplePost())
-    }
 
     func testImportedWhitespacePunctuationAndLineBreaksSurviveDiskRoundTrip() throws {
-        let store = makeStore()
-        var post = samplePost()
-        post.hook = "  Keep this exactly…\n\nwith punctuation!  \t"
-        post.script = "Line one.\r\nLine two;\n\n  trailing spaces  "
-        post.caption = "Caption with \"quotes\" and apostrophe's."
-        let submission = try store.submit(kind: .post, post: post, series: nil, agent: "claude", note: nil, revisionOf: nil)
-        let reloaded = InboxStore(file: store.file)
-        XCTAssertEqual(reloaded.pending.first(where: { $0.id == submission.id })?.post, post)
-    }
-
-    func testMakeIDIsUniqueAndLowercaseAlphanumeric() {
-        var seen = Set<String>()
-        for _ in 0..<200 {
-            let id = InboxStore.makeID()
-            XCTAssertEqual(id.count, 16)
-            XCTAssertTrue(id.hasPrefix("sub_"))
-            let body = id.dropFirst(4)
-            XCTAssertTrue(body.allSatisfy { ("a"..."z").contains($0) || ("0"..."9").contains($0) })
-            XCTAssertTrue(seen.insert(id).inserted)
-        }
-    }
-
-    func testSubmitSeriesKeepsEpisodes() throws {
-        let store = makeStore()
-        let submission = try store.submit(kind: .series, post: nil, series: sampleSeries(), agent: "codex", note: nil, revisionOf: nil)
-        XCTAssertEqual(submission.kind, .series)
-        XCTAssertEqual(submission.series?.episodes.count, 3)
-        XCTAssertNil(submission.post)
-    }
-
-    func testRevisionOfIsStored() throws {
-        let store = makeStore()
-        let first = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
-        _ = try store.decide(id: first.id, status: .changesRequested, comment: "Revise this")
-        let second = try store.submit(kind: .post, post: samplePost(title: "Better"), series: nil, agent: "claude", note: nil, revisionOf: first.id)
-        XCTAssertEqual(second.revisionOf, first.id)
-        XCTAssertNotEqual(second.id, first.id)
-    }
-
-    func testLongNoteIsClampedToTwoThousandCharacters() throws {
-        let store = makeStore()
-        let note = String(repeating: "a", count: 10_000)
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: note, revisionOf: nil)
-        XCTAssertEqual(submission.note?.count, 2_000)
-        XCTAssertEqual(submission.note, String(repeating: "a", count: 2_000))
-
-        let reloaded = InboxStore(file: store.file)
-        XCTAssertEqual(reloaded.pending.first?.note?.count, 2_000)
-    }
-
-    func testNoteIsTrimmedAndBlankNoteBecomesNil() throws {
-        let store = makeStore()
-        let kept = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: "  Take a look\n", revisionOf: nil)
-        XCTAssertEqual(kept.note, "Take a look")
-        let blank = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: "   \n ", revisionOf: nil)
-        XCTAssertNil(blank.note)
-    }
-
-    func testInvalidRevisionOfIsRefused() throws {
-        let store = makeStore()
-        for bad in ["nope", "sub_SHOUTING123", "sub_abc", "sub_abcdef1234567", "abcdefghijkl", "sub_abcdef 12345", ""] {
-            let error = XCTAssertThrowsErrorReturning {
-                _ = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: bad)
-            }
-            XCTAssertEqual(message(error), "That submission id is not valid.", "revisionOf: \(bad)")
-        }
-        XCTAssertTrue(store.pending.isEmpty)
-    }
-
-    func testUnknownRevisionIsRefused() throws {
-        let store = makeStore()
-        XCTAssertThrowsError(try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: "sub_abcdef123456"))
-        XCTAssertTrue(store.pending.isEmpty)
-    }
-
-    func testRevisionRetriesDoNotDuplicateAndCannotFork() throws {
-        let store = makeStore()
-        let first = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
-        XCTAssertThrowsError(try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: first.id))
-        _ = try store.decide(id: first.id, status: .changesRequested, comment: "Change the title")
-        let revised = try store.submit(kind: .post, post: samplePost(title: "Revised"), series: nil, agent: "claude", note: nil, revisionOf: first.id)
-        let retry = try store.submit(kind: .post, post: samplePost(title: "Revised"), series: nil, agent: "claude", note: nil, revisionOf: first.id)
-        XCTAssertEqual(revised.id, retry.id)
-        XCTAssertEqual(store.pending.count, 1)
-        XCTAssertThrowsError(try store.submit(kind: .post, post: samplePost(title: "Fork"), series: nil, agent: "claude", note: nil, revisionOf: first.id))
-        XCTAssertEqual(InboxStore(file: store.file).pending.count, 1)
-    }
-
-    func testValidationRejectsMissingPayload() {
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: nil, series: nil) }), "Add a post to submit.")
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .series, post: nil, series: nil) }), "Add a series to submit.")
-    }
-
-    func testValidationRejectsEmptyTitlePillarPlatform() {
-        var post = samplePost(title: "   ")
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: post, series: nil) }), "Give the post a title.")
-        post = samplePost(pillar: "")
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: post, series: nil) }), "Choose a pillar.")
-        post = samplePost(platform: "")
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: post, series: nil) }), "Choose a platform.")
-    }
-
-    func testValidationRejectsTooManyScenes() {
-        var post = samplePost()
-        post.scenes = (0..<41).map { SubmittedScene(script: "Scene \($0)", shotNotes: "") }
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: post, series: nil) }), "Choose up to 40 scenes.")
-        post.scenes = (0..<40).map { SubmittedScene(script: "Scene \($0)", shotNotes: "") }
-        XCTAssertNoThrow(try SubmissionValidation.validate(kind: .post, post: post, series: nil))
-    }
-
-    func testValidationRejectsTooManyEpisodes() {
-        let tooMany = SubmittedSeries(name: "Long run", pillar: "Health", summary: nil,
-                                      episodes: (1...53).map { SubmittedEpisode(number: $0, date: nil, post: samplePost(title: "E\($0)")) })
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .series, post: nil, series: tooMany) }),
-                       "A series can have up to 52 episodes.")
-        let empty = SubmittedSeries(name: "Empty", pillar: "Health", summary: nil, episodes: [])
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .series, post: nil, series: empty) }),
-                       "Add at least one episode.")
-    }
-
-    func testValidationRejectsTooMuchText() {
-        var post = samplePost()
-        post.script = String(repeating: "a", count: 24_001)
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .post, post: post, series: nil) }),
-                       "This submission is too long. Keep it under 24,000 characters.")
-        var series = sampleSeries(episodes: 2)
-        series.episodes[0].post.caption = String(repeating: "b", count: 24_001)
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .series, post: nil, series: series) }),
-                       "This submission is too long. Keep it under 24,000 characters.")
-    }
-
-    func testValidationRejectsEmptySeriesName() {
-        let series = SubmittedSeries(name: " ", pillar: "Health", summary: nil, episodes: [SubmittedEpisode(number: 1, date: nil, post: samplePost())])
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try SubmissionValidation.validate(kind: .series, post: nil, series: series) }),
-                       "Give the series a name.")
-    }
-
-    func testSubmitValidates() {
-        let store = makeStore()
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try store.submit(kind: .post, post: samplePost(title: ""), series: nil, agent: "claude", note: nil, revisionOf: nil) }),
-                       "Give the post a title.")
-        XCTAssertTrue(store.pending.isEmpty)
-    }
-
-    func testPendingLimitRefusesTwoHundredAndFirst() throws {
-        let store = makeStore()
-        for index in 0..<200 {
-            _ = try store.submit(kind: .post, post: samplePost(title: "Post \(index)"), series: nil, agent: "claude", note: nil, revisionOf: nil)
-        }
-        XCTAssertEqual(store.pending.count, 200)
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil) }),
-                       "Iris has 200 submissions waiting. Ask the creator to clear the Inbox first.")
-        _ = try store.decide(id: store.pending[0].id, status: .approved, comment: nil)
-        XCTAssertNoThrow(try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil))
-    }
-
-    func testArchiveProposalPersistsAndOperationRetriesStayIdempotentAfterDecision() throws {
-        let store = makeStore()
-        let proposal = ArchiveProposal(accountID: UUID(), operationID: UUID(),
-                                       posts: [ArchiveTarget(id: UUID(), revision: "record-r1")], reason: "Reviewed duplicate")
-        let first = try store.submitArchive(proposal, agent: "codex")
-        XCTAssertEqual(first.kind, .archive)
-        XCTAssertEqual(first.archive, proposal)
-        _ = try store.decide(id: first.id, status: .denied, comment: "Keep it")
-        let retry = try store.submitArchive(proposal, agent: "codex")
-        XCTAssertEqual(retry.id, first.id)
-        XCTAssertEqual(retry.status, .denied)
-        var changed = proposal
-        changed.reason = "Different request"
-        XCTAssertEqual(message(XCTAssertThrowsErrorReturning { try store.submitArchive(changed, agent: "codex") }),
-                       "That operation id was already used for a different archive request.")
-        XCTAssertEqual(InboxStore(file: store.file).all(since: Date(timeIntervalSince1970: 0)).count, 1)
-    }
-
-    func testArchiveProposalSaveFailureRollsBackMemory() throws {
-        let directory = makeDirectory()
-        let store = InboxStore(file: directory.appendingPathComponent("inbox.json"))
-        try FileManager.default.removeItem(at: directory)
-        let proposal = ArchiveProposal(accountID: UUID(), operationID: UUID(), posts: [ArchiveTarget(id: UUID(), revision: "r1")], reason: "Review")
-        XCTAssertThrowsError(try store.submitArchive(proposal, agent: "codex"))
-        XCTAssertTrue(store.pending.isEmpty)
+        var submission = SavedInbox.post("sub_aaaaaaaaaaaa")
+        submission.post?.hook = "  Keep this exactly…\n\nwith punctuation!  \t"
+        submission.post?.script = "Line one.\r\nLine two;\n\n  trailing spaces  "
+        submission.post?.caption = "Caption with \"quotes\" and apostrophe's."
+        let store = SavedInbox.store([submission])
+        _ = try store.decide(id: submission.id, status: .changesRequested, comment: nil)
+        XCTAssertEqual(InboxStore(file: store.file).all(since: nil).first?.post, submission.post)
     }
 
     // MARK: decide
 
     func testDecideFlipsStatusAndSetsDecidedAt() throws {
         var now = Date(timeIntervalSince1970: 1_700_000_000)
-        let store = makeStore(now: { now })
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let submission = SavedInbox.post("sub_aaaaaaaaaaaa", createdAt: now)
+        let store = SavedInbox.store([submission], now: { now })
         now = Date(timeIntervalSince1970: 1_700_000_600)
         let decided = try store.decide(id: submission.id, status: .changesRequested, comment: "Tighten the hook")
         XCTAssertEqual(decided.status, .changesRequested)
@@ -251,8 +38,8 @@ final class SubmissionsTests: XCTestCase {
     }
 
     func testDecideTwiceThrowsAndUnknownIDThrows() throws {
-        let store = makeStore()
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let submission = SavedInbox.post("sub_aaaaaaaaaaaa")
+        let store = SavedInbox.store([submission])
         _ = try store.decide(id: submission.id, status: .approved, comment: nil)
         // Typed so the router can pick 409 vs 404 without reading the copy; the sentences are what the app shows.
         let twice = XCTAssertThrowsErrorReturning { try store.decide(id: submission.id, status: .denied, comment: nil) }
@@ -268,8 +55,8 @@ final class SubmissionsTests: XCTestCase {
     /// disagree with everything the running helper had said.
     func testADecisionThatCannotBeSavedLeavesMemoryAsItWas() throws {
         let directory = makeDirectory()
-        let store = InboxStore(file: directory.appendingPathComponent("inbox.json"))
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let submission = SavedInbox.post("sub_aaaaaaaaaaaa")
+        let store = SavedInbox.store([submission], file: directory.appendingPathComponent("inbox.json"))
         // Nothing can be written from here on: the folder the file lives in is gone.
         try FileManager.default.removeItem(at: directory)
         XCTAssertThrowsError(try store.decide(id: submission.id, status: .approved, comment: "Looks good"))
@@ -284,18 +71,16 @@ final class SubmissionsTests: XCTestCase {
 
     func testAllSinceFiltersAndSortsNewestFirst() throws {
         var now = Date(timeIntervalSince1970: 1_700_000_000)
-        let store = makeStore(now: { now })
-        let old = try store.submit(kind: .post, post: samplePost(title: "Old"), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let old = SavedInbox.post("sub_aaaaaaaaaaaa", title: "Old", createdAt: now)
+        let recent = SavedInbox.post("sub_bbbbbbbbbbbb", title: "Recent", createdAt: now.addingTimeInterval(60 * 24 * 3600))
+        let stillPending = SavedInbox.post("sub_cccccccccccc", title: "Pending", createdAt: now.addingTimeInterval(60 * 24 * 3600 + 60))
+        let store = SavedInbox.store([old, recent, stillPending], now: { now })
         _ = try store.decide(id: old.id, status: .approved, comment: nil)
-        now = now.addingTimeInterval(60 * 24 * 3600)   // 60 days later
-        let recent = try store.submit(kind: .post, post: samplePost(title: "Recent"), series: nil, agent: "claude", note: nil, revisionOf: nil)
-        now = now.addingTimeInterval(60)
-        let stillPending = try store.submit(kind: .post, post: samplePost(title: "Pending"), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        now = now.addingTimeInterval(60 * 24 * 3600 + 60)   // 60 days later
         _ = try store.decide(id: recent.id, status: .denied, comment: nil)
 
         let defaultWindow = store.all(since: nil)
-        XCTAssertEqual(Set(defaultWindow.map(\.id)), [recent.id, stillPending.id])
-        XCTAssertEqual(defaultWindow.map(\.id), [stillPending.id, recent.id])   // newest first
+        XCTAssertEqual(defaultWindow.map(\.id), [stillPending.id, recent.id])   // newest first, the old decision aged out
 
         let sinceFuture = store.all(since: now.addingTimeInterval(3600))
         XCTAssertEqual(sinceFuture.map(\.id), [stillPending.id])   // only pending survives a future cutoff
@@ -308,12 +93,12 @@ final class SubmissionsTests: XCTestCase {
 
     func testPruneDecidedRemovesOldDecisionsOnly() throws {
         var now = Date(timeIntervalSince1970: 1_700_000_000)
-        let store = makeStore(now: { now })
-        let old = try store.submit(kind: .post, post: samplePost(title: "Old"), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let old = SavedInbox.post("sub_aaaaaaaaaaaa", title: "Old", createdAt: now)
+        let keptPending = SavedInbox.post("sub_bbbbbbbbbbbb", title: "Pending", createdAt: now)
+        let fresh = SavedInbox.post("sub_cccccccccccc", title: "Fresh", createdAt: now.addingTimeInterval(40 * 24 * 3600))
+        let store = SavedInbox.store([old, keptPending, fresh], now: { now })
         _ = try store.decide(id: old.id, status: .approved, comment: nil)
-        let keptPending = try store.submit(kind: .post, post: samplePost(title: "Pending"), series: nil, agent: "claude", note: nil, revisionOf: nil)
         now = now.addingTimeInterval(40 * 24 * 3600)
-        let fresh = try store.submit(kind: .post, post: samplePost(title: "Fresh"), series: nil, agent: "claude", note: nil, revisionOf: nil)
         _ = try store.decide(id: fresh.id, status: .denied, comment: nil)
 
         let removed = try store.pruneDecided(olderThan: 30 * 24 * 3600)
@@ -353,8 +138,10 @@ final class SubmissionsTests: XCTestCase {
 
     func testJSONUsesISO8601DatesAndCamelCaseKeys() throws {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let store = makeStore(now: { now })
-        let submission = try store.submit(kind: .post, post: samplePost(), series: nil, agent: "claude", note: nil, revisionOf: nil)
+        var submission = SavedInbox.post("sub_aaaaaaaaaaaa", createdAt: now)
+        submission.post?.postingDate = "2026-09-20"
+        submission.post?.scenes = [SubmittedScene(script: "Wake up", shotNotes: "Wide")]
+        let store = SavedInbox.store([submission], now: { now })
         _ = try store.decide(id: submission.id, status: .approved, comment: "Looks good")
         let raw = try String(contentsOf: store.file, encoding: .utf8)
         XCTAssertTrue(raw.contains("\"createdAt\" : \"2023-11-14T22:13:20Z\""), raw)

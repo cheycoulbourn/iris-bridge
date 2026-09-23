@@ -172,34 +172,6 @@ public final class AdminClient {
         return statusError(status, body, while: action)
     }
 
-    public func submit(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?,
-                       agent: String, note: String?, revisionOf: String?) throws -> Submission {
-        struct Body: Encodable {
-            var kind: SubmissionKind; var post: SubmittedPost?; var series: SubmittedSeries?
-            var agent: String; var note: String?; var revisionOf: String?
-        }
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        let body = try encoder.encode(Body(kind: kind, post: post, series: series, agent: agent, note: note, revisionOf: revisionOf))
-        let (status, data) = try callData("POST", "/admin/inbox", body: body)
-        guard status == 200 else { throw Self.inboxError(status, data, while: "accept that submission") }
-        guard let submission = try? Self.inboxDecoder().decode(Submission.self, from: data) else {
-            throw BridgeError.message("Iris Bridge did not send back the submission it saved.")
-        }
-        return submission
-    }
-
-    public func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
-        struct Body: Encodable { var kind: SubmissionKind; var archive: ArchiveProposal; var agent: String }
-        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-        let body = try encoder.encode(Body(kind: .archive, archive: proposal, agent: agent))
-        let (status, data) = try callData("POST", "/admin/inbox", body: body)
-        guard status == 200 else { throw Self.inboxError(status, data, while: "queue that archive proposal") }
-        guard let submission = try? Self.inboxDecoder().decode(Submission.self, from: data) else {
-            throw BridgeError.message("Iris Bridge did not send back the archive proposal it saved.")
-        }
-        return submission
-    }
-
     public func listSubmissions(status wanted: String) throws -> [Submission] {
         let (status, data) = try callData("GET", "/admin/inbox?status=" + wanted)
         guard status == 200 else { throw Self.inboxError(status, data, while: "list what is waiting") }
@@ -207,15 +179,6 @@ public final class AdminClient {
             throw BridgeError.message("Iris Bridge did not send back a list of submissions.")
         }
         return list
-    }
-
-    public func context() throws -> WorkspaceContext {
-        let (status, data) = try callData("GET", "/admin/context")
-        guard status == 200 else { throw Self.inboxError(status, data, while: "describe the workspace") }
-        guard let context = try? Self.inboxDecoder().decode(WorkspaceContext.self, from: data) else {
-            throw BridgeError.message("Iris Bridge did not send back a workspace snapshot.")
-        }
-        return context
     }
 
     /// How many decided submissions the helper dropped.

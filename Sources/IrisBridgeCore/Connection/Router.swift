@@ -191,7 +191,6 @@ public final class Router: @unchecked Sendable {
         case ("DELETE", let path) where path.hasPrefix("/admin/devices/"):
             let id = String(path.dropFirst("/admin/devices/".count))
             return (try? devices.revoke(id: id)) == true ? HTTPResponse(status: 200, json: ["revoked": id]) : HTTPResponse(status: 404, error: "unknown-device")
-        case ("POST", "/admin/inbox"): return adminSubmit(request)
         case ("POST", "/admin/v3/tool"):
             return tool(request)
         case ("POST", "/admin/inbox/prune"):
@@ -202,14 +201,6 @@ public final class Router: @unchecked Sendable {
         case ("GET", "/admin/inbox"):
             let all = request.query["status"] == "all"
             return Self.encoded(200, all ? inbox.all(since: Date(timeIntervalSince1970: 0)) : inbox.pending)
-        case ("GET", "/admin/context"):
-            guard let current = contextStore.current else {
-                // Two different problems with two different fixes. A Mac nobody has paired with is where
-                // every new install starts, and the agent is the only one in a position to say so.
-                return HTTPResponse(status: 404, error: devices.all.isEmpty ? Self.notPairedSentence
-                                                                            : "No workspace context yet. Open Iris on a paired device.")
-            }
-            return Self.encoded(200, current)
         default: return HTTPResponse(status: 404, error: "Not found")
         }
     }
@@ -235,15 +226,6 @@ public final class Router: @unchecked Sendable {
 
     private struct InboxPayload: Encodable { var submissions: [Submission]; var now: Date }
     private struct DecisionBody: Decodable { var status: String; var comment: String? }
-    private struct SubmitBody: Decodable {
-        var kind: SubmissionKind
-        var post: SubmittedPost?
-        var series: SubmittedSeries?
-        var archive: ArchiveProposal?
-        var agent: String?
-        var note: String?
-        var revisionOf: String?
-    }
 
     /// Everything the inbox returns is `Codable`, so it is encoded here rather than hand-built as a
     /// dictionary. Dates go out as ISO 8601, the shape the app and the stores already agree on.
@@ -327,30 +309,5 @@ public final class Router: @unchecked Sendable {
             return HTTPResponse(status: 500, error: "Could not save that workspace snapshot.")
         }
         return HTTPResponse(status: 200, json: ["saved": true])
-    }
-
-    private func adminSubmit(_ request: HTTPRequest) -> HTTPResponse {
-        guard let body = try? JSONDecoder().decode(SubmitBody.self, from: request.body) else {
-            return HTTPResponse(status: 400, error: "Could not read that submission.")
-        }
-        do {
-            let submission: Submission
-            if body.kind == .archive {
-                guard let archive = body.archive, body.post == nil, body.series == nil, body.revisionOf == nil else {
-                    return HTTPResponse(status: 400, error: "Could not read that archive proposal.")
-                }
-                submission = try inbox.submitArchive(archive, agent: body.agent ?? "agent", note: body.note)
-            } else {
-                guard body.archive == nil else { return HTTPResponse(status: 400, error: "Archive data belongs in an archive proposal.") }
-                submission = try inbox.submit(kind: body.kind, post: body.post, series: body.series,
-                                               agent: body.agent ?? "agent", note: body.note, revisionOf: body.revisionOf)
-            }
-            log?.info("inbox received \(submission.kind.rawValue) \(submission.id) from \(submission.agent)")
-            return Self.encoded(200, submission)
-        } catch let error as BridgeError {
-            return HTTPResponse(status: 400, error: error.errorDescription ?? "Could not accept that submission.")
-        } catch {
-            return HTTPResponse(status: 500, error: "Could not save that submission.")
-        }
     }
 }

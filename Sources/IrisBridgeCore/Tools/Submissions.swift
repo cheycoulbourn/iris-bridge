@@ -1,5 +1,4 @@
 import Foundation
-import Security
 
 // MARK: - Models
 
@@ -200,77 +199,11 @@ public struct ContextEpisode: Codable, Equatable {
     }
 }
 
-// MARK: - Limits and validation
+// MARK: - Limits
 
 public enum SubmissionLimits {
-    public static let characters = 24_000
+    /// The longest comment a decision keeps.
     public static let noteCharacters = 2_000
-    public static let scenes = 40
-    public static let episodes = 52
-    public static let pending = 200
-    public static let archiveTargets = 100
-}
-
-public enum SubmissionValidation {
-    public static func validate(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?) throws {
-        switch kind {
-        case .post:
-            guard let post else { throw BridgeError.message("Add a post to submit.") }
-            try validate(post: post)
-            guard characters(in: post) <= SubmissionLimits.characters else { throw BridgeError.message(tooLong) }
-        case .series:
-            guard let series else { throw BridgeError.message("Add a series to submit.") }
-            guard !trimmed(series.name).isEmpty else { throw BridgeError.message("Give the series a name.") }
-            guard !trimmed(series.pillar).isEmpty else { throw BridgeError.message("Choose a pillar.") }
-            guard !series.episodes.isEmpty else { throw BridgeError.message("Add at least one episode.") }
-            guard series.episodes.count <= SubmissionLimits.episodes else {
-                throw BridgeError.message("A series can have up to \(SubmissionLimits.episodes) episodes.")
-            }
-            for episode in series.episodes { try validate(post: episode.post) }
-            var total = series.name.count + (series.summary?.count ?? 0)
-            for episode in series.episodes { total += characters(in: episode.post) }
-            guard total <= SubmissionLimits.characters else { throw BridgeError.message(tooLong) }
-        case .archive:
-            throw BridgeError.message("Archive proposals must include their target records.")
-        }
-    }
-
-    public static func validate(archive proposal: ArchiveProposal) throws {
-        guard !proposal.posts.isEmpty else { throw BridgeError.message("Choose at least one post to archive.") }
-        guard proposal.posts.count <= SubmissionLimits.archiveTargets else {
-            throw BridgeError.message("Choose up to \(SubmissionLimits.archiveTargets) posts to archive.")
-        }
-        guard Set(proposal.posts.map(\.id)).count == proposal.posts.count else {
-            throw BridgeError.message("Each archive target must appear once.")
-        }
-        guard proposal.posts.allSatisfy({ !$0.revision.isEmpty }) else {
-            throw BridgeError.message("Each archive target needs its current revision.")
-        }
-        guard !proposal.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BridgeError.message("Give the archive request a reason.")
-        }
-    }
-
-    private static let tooLong = "This submission is too long. Keep it under 24,000 characters."
-
-    private static func validate(post: SubmittedPost) throws {
-        guard !trimmed(post.title).isEmpty else { throw BridgeError.message("Give the post a title.") }
-        guard !trimmed(post.pillar).isEmpty else { throw BridgeError.message("Choose a pillar.") }
-        guard !trimmed(post.platform).isEmpty else { throw BridgeError.message("Choose a platform.") }
-        guard (post.scenes?.count ?? 0) <= SubmissionLimits.scenes else {
-            throw BridgeError.message("Choose up to \(SubmissionLimits.scenes) scenes.")
-        }
-    }
-
-    private static func characters(in post: SubmittedPost) -> Int {
-        var total = post.title.count + post.pillar.count + post.platform.count + post.format.count
-        total += (post.hook?.count ?? 0) + (post.script?.count ?? 0) + (post.caption?.count ?? 0)
-        total += (post.cta?.count ?? 0) + (post.notes?.count ?? 0) + (post.seriesName?.count ?? 0)
-        for scene in post.scenes ?? [] { total += scene.script.count + scene.shotNotes.count }
-        return total
-    }
-
-    private static func trimmed(_ text: String) -> String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
 }
 
 // MARK: - Inbox errors
@@ -299,88 +232,6 @@ public final class InboxStore: @unchecked Sendable {
         self.file = file; self.now = now
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         submissions = (try? decoder.decode([Submission].self, from: Data(contentsOf: file))) ?? []
-    }
-
-    /// "sub_" + 12 lowercase alphanumerics.
-    public static func makeID() -> String {
-        let alphabet = Array("abcdefghijklmnopqrstuvwxyz0123456789")
-        var bytes = [UInt8](repeating: 0, count: 12)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        precondition(status == errSecSuccess, "Iris Bridge could not generate a submission identifier (\(status)).")
-        return "sub_" + String(bytes.map { alphabet[Int($0) % alphabet.count] })
-    }
-
-    private static let idAlphabet = Set("abcdefghijklmnopqrstuvwxyz0123456789")
-
-    /// True for "sub_" followed by exactly 12 lowercase alphanumerics, the shape `makeID()` produces.
-    static func isSubmissionID(_ id: String) -> Bool {
-        guard id.count == 16, id.hasPrefix("sub_") else { return false }
-        return id.dropFirst(4).allSatisfy { idAlphabet.contains($0) }
-    }
-
-    public func submit(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?,
-                       agent: String, note: String?, revisionOf: String?) throws -> Submission {
-        try SubmissionValidation.validate(kind: kind, post: post, series: series)
-        lock.lock(); defer { lock.unlock() }
-        if let revisionOf, !Self.isSubmissionID(revisionOf) {
-            throw BridgeError.message("That submission id is not valid.")
-        }
-        if let revisionOf {
-            guard let original = submissions.first(where: { $0.id == revisionOf }) else {
-                throw BridgeError.message("That submission was not found.")
-            }
-            guard original.kind == kind else { throw BridgeError.message("A revision must keep the original type of work.") }
-            if let existing = submissions.first(where: { $0.revisionOf == revisionOf }) {
-                // A lost response must not turn a retry into a second approval card.
-                if existing.post == post && existing.series == series { return existing }
-                throw BridgeError.message("A revision already exists. Read its status and revise that submission after the creator requests changes.")
-            }
-            guard original.status == .changesRequested else {
-                throw BridgeError.message("The creator must request changes before this submission can be revised.")
-            }
-        }
-        // A retry of an already-created revision must remain idempotent even when the Inbox is at capacity.
-        guard submissions.filter({ $0.status == .pending }).count < SubmissionLimits.pending else {
-            throw BridgeError.message("Iris has \(SubmissionLimits.pending) submissions waiting. Ask the creator to clear the Inbox first.")
-        }
-        let cleanAgent = String(agent.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
-        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let cleanNote = trimmedNote.isEmpty ? nil : String(trimmedNote.prefix(SubmissionLimits.noteCharacters))
-        let submission = Submission(id: Self.makeID(), kind: kind,
-                                    post: kind == .post ? post : nil,
-                                    series: kind == .series ? series : nil,
-                                    agent: cleanAgent.isEmpty ? "agent" : cleanAgent,
-                                    note: cleanNote, status: .pending, comment: nil,
-                                    createdAt: now(), decidedAt: nil, revisionOf: revisionOf)
-        submissions.append(submission)
-        do { try save() } catch { submissions.removeLast(); throw error }
-        return submission
-    }
-
-    /// Archive requests have an operation id because callers can lose the reply after the helper persists it.
-    /// The retry check runs before pending-capacity validation and includes decided submissions, so retrying
-    /// can never create a second archive card or turn a past decision back into a pending proposal.
-    public func submitArchive(_ proposal: ArchiveProposal, agent: String, note: String? = nil) throws -> Submission {
-        try SubmissionValidation.validate(archive: proposal)
-        lock.lock(); defer { lock.unlock() }
-        if let existing = submissions.first(where: { $0.archive?.operationID == proposal.operationID }) {
-            guard existing.archive == proposal else {
-                throw BridgeError.message("That operation id was already used for a different archive request.")
-            }
-            return existing
-        }
-        guard submissions.filter({ $0.status == .pending }).count < SubmissionLimits.pending else {
-            throw BridgeError.message("Iris has \(SubmissionLimits.pending) submissions waiting. Ask the creator to clear the Inbox first.")
-        }
-        let cleanAgent = String(agent.trimmingCharacters(in: .whitespacesAndNewlines).prefix(80))
-        let trimmedNote = note?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let cleanNote = trimmedNote.isEmpty ? nil : String(trimmedNote.prefix(SubmissionLimits.noteCharacters))
-        let submission = Submission(id: Self.makeID(), kind: .archive, archive: proposal,
-                                    agent: cleanAgent.isEmpty ? "agent" : cleanAgent, note: cleanNote,
-                                    status: .pending, createdAt: now())
-        submissions.append(submission)
-        do { try save() } catch { submissions.removeLast(); throw error }
-        return submission
     }
 
     /// Pending submissions plus anything created or decided after `since`; `nil` means the last 30 days. Newest first.

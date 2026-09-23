@@ -61,12 +61,16 @@ final class RouterTests: XCTestCase {
         let (status, data) = raw(method, path, body: body, auth: auth, loopback: loopback)
         return (status, (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] ?? [])
     }
-    private let postBody = #"{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel"}"#
+    /// The v2 Inbox's clock; a test that moves time sets it before its first `submit`.
+    private var inboxClock: () -> Date = Date.init
+    /// A submission helper 0.2.x saved: added to `inbox.json`, then the store and router are opened on it again.
     @discardableResult
     private func submit(title: String = "Three shots") -> Submission {
-        try! inbox.submit(kind: .post,
-                          post: SubmittedPost(title: title, pillar: "Craft", platform: "Instagram", format: "Reel"),
-                          series: nil, agent: "claude", note: "Ready for you.", revisionOf: nil)
+        let submission = SavedInbox.post(title: title, createdAt: inboxClock())
+        inbox = SavedInbox.store(inbox.all(since: Date(timeIntervalSince1970: 0)).reversed() + [submission], file: inbox.file, now: inboxClock)
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: generator, log: nil)
+        return submission
     }
     func testStatusIsPublicAndReportsProviders() {
         let (status, body) = send("GET", "/status")
@@ -264,10 +268,8 @@ final class RouterTests: XCTestCase {
     func testDecisionReportsASaveFailureAsAServerError() {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let doomed = InboxStore(file: dir.appendingPathComponent("inbox.json"))
-        let submission = try! doomed.submit(kind: .post,
-                                            post: SubmittedPost(title: "Three shots", pillar: "Craft", platform: "Instagram", format: "Reel"),
-                                            series: nil, agent: "claude", note: nil, revisionOf: nil)
+        let submission = SavedInbox.post("sub_aaaaaaaaaaaa")
+        let doomed = SavedInbox.store([submission], file: dir.appendingPathComponent("inbox.json"))
         router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
                         inbox: doomed, context: context, generator: generator, log: nil)
         // The file the store writes through is gone, so `save()` throws where the decision itself would have worked.
@@ -280,31 +282,16 @@ final class RouterTests: XCTestCase {
 
     // MARK: - Context
 
-    /// A Mac nobody has paired with is the state every new install is in, and "open Iris on a paired device"
-    /// tells an agent nothing it can pass on. It is told what the person has to do instead.
-    func testContextOnAnUnpairedMacSaysHowToPair() throws {
-        for device in devices.all { _ = try devices.revoke(id: device.id) }
-        let missing = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
-        XCTAssertEqual(missing.0, 404)
-        XCTAssertEqual(missing.1["error"] as? String, Router.notPairedSentence)
-    }
-
-    func testContextRoundTripsFromDeviceToAdmin() {
-        let missing = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
-        XCTAssertEqual(missing.0, 404)
-        XCTAssertEqual(missing.1["error"] as? String, "No workspace context yet. Open Iris on a paired device.")
-
+    /// An older app still pushes its context; the Iris read tools answer from it until a v3 app pushes a snapshot.
+    func testAnOlderAppsContextIsStillSaved() {
         let payload = #"{"creatorName":"Chey","pillars":[{"name":"Craft","detail":"How it is made","isAnchor":true,"weekdays":[2]}],"platforms":[{"name":"Instagram","formats":["Reel"],"weeklyGoal":3}],"series":[],"updatedAt":"2026-09-16T10:00:00Z"}"#
         XCTAssertEqual(send("PUT", "/context", body: payload).0, 401)
         let saved = send("PUT", "/context", body: payload, auth: token)
         XCTAssertEqual(saved.0, 200)
         XCTAssertEqual(saved.1["saved"] as? Bool, true)
         XCTAssertEqual(context.current?.creatorName, "Chey")
-
-        let read = send("GET", "/admin/context", auth: "admin-secret", loopback: true)
-        XCTAssertEqual(read.0, 200)
-        XCTAssertEqual(read.1["creatorName"] as? String, "Chey")
-        XCTAssertEqual((read.1["pillars"] as? [[String: Any]])?.first?["name"] as? String, "Craft")
+        XCTAssertEqual(context.current?.pillars.first?.name, "Craft")
+        XCTAssertEqual(send("GET", "/admin/context", auth: "admin-secret", loopback: true).0, 404, "the v0.2.x tools' route is gone")
     }
 
     func testContextRejectsUnreadableAndOversizedBodies() {
@@ -352,26 +339,9 @@ final class RouterTests: XCTestCase {
 
     // MARK: - Admin inbox
 
-    func testAdminSubmitNeedsLoopbackAndAdminTokenThenValidates() {
-        let body = #"{"kind":"post","agent":"claude","note":"Ready for you.","post":\#(postBody)}"#
-        XCTAssertEqual(send("POST", "/admin/inbox", body: body, auth: "admin-secret", loopback: false).0, 404)
-        XCTAssertEqual(send("POST", "/admin/inbox", body: body, auth: "wrong", loopback: true).0, 401)
-        let (status, reply) = send("POST", "/admin/inbox", body: body, auth: "admin-secret", loopback: true)
-        XCTAssertEqual(status, 200)
-        XCTAssertEqual(reply["kind"] as? String, "post")
-        XCTAssertEqual(reply["agent"] as? String, "claude")
-        XCTAssertEqual(reply["note"] as? String, "Ready for you.")
-        XCTAssertEqual(reply["status"] as? String, "pending")
-        XCTAssertTrue((reply["id"] as? String)?.hasPrefix("sub_") == true)
-        XCTAssertEqual(inbox.pending.count, 1)
-
-        // Validation failures come back as 400 with the sentence the creator's agent should read.
-        let empty = send("POST", "/admin/inbox", body: #"{"kind":"post","agent":"claude"}"#, auth: "admin-secret", loopback: true)
-        XCTAssertEqual(empty.0, 400)
-        XCTAssertEqual(empty.1["error"] as? String, "Add a post to submit.")
-        let noTitle = #"{"kind":"post","agent":"claude","post":{"title":"  ","pillar":"Craft","platform":"Instagram","format":"Reel"}}"#
-        XCTAssertEqual(send("POST", "/admin/inbox", body: noTitle, auth: "admin-secret", loopback: true).1["error"] as? String, "Give the post a title.")
-        XCTAssertEqual(send("POST", "/admin/inbox", body: "{}", auth: "admin-secret", loopback: true).0, 400)
+    func testTheV02xSubmitRouteIsGone() {
+        let body = #"{"kind":"post","agent":"claude","post":{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel"}}"#
+        XCTAssertEqual(send("POST", "/admin/inbox", body: body, auth: "admin-secret", loopback: true).0, 404)
     }
 
     func testAdminInboxListsPendingByDefaultAndAllOnRequest() {
@@ -394,9 +364,8 @@ final class RouterTests: XCTestCase {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try! FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         var clock = Date(timeIntervalSince1970: 1_000_000)
-        inbox = InboxStore(file: dir.appendingPathComponent("inbox.json"), now: { clock })
-        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
-                        inbox: inbox, context: context, generator: generator, log: nil)
+        inboxClock = { clock }
+        inbox = InboxStore(file: dir.appendingPathComponent("inbox.json"), now: inboxClock)
         let decided = submit(title: "Long ago")
         _ = try! inbox.decide(id: decided.id, status: .approved, comment: nil)
         let stillWaiting = submit(title: "Never looked at")

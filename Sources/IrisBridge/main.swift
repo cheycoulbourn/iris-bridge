@@ -118,7 +118,9 @@ do {
         } else {
             let waiting = try client.listSubmissions(status: "pending")
             if waiting.isEmpty {
-                print("Nothing is waiting. Your agent has not sent anything yet.")
+                // 0.3.0 sends agents' changes to the Iris app itself (its Inbox and Activity); this list only
+                // holds what Iris Bridge 0.2 collected.
+                print("Nothing from Iris Bridge 0.2 is waiting. Changes from your agents now appear in Iris itself.")
             }
             let now = Date()
             for submission in waiting {

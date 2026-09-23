@@ -18,7 +18,8 @@ public protocol StreamOutbox: AnyObject {
 public protocol StreamHandler: AnyObject {
     /// `hello.ok`, built when the device has proved who it is.
     func helloOK(for device: PairedDevice) -> JSONValue
-    /// Right after `hello.ok`: replay from the cursors, then anything still waiting for an answer.
+    /// Right after `hello.ok`: replay from the cursors, then anything still waiting for an answer. What it
+    /// sends before it returns reaches the device ahead of anything broadcast meanwhile.
     func connected(device: PairedDevice, cursors: [String: Int], send: @escaping (JSONValue) -> Void)
     func received(_ message: AppMessage, from device: PairedDevice)
     /// The device's last stream closed.
@@ -27,8 +28,18 @@ public protocol StreamHandler: AnyObject {
 
 /// Authenticates each stream on its first message (spec §10), keeps the authenticated ones, and fans
 /// messages out to them. A stream never sees anything before it has proved it belongs to a paired device.
+///
+/// A device that has just said hello is greeted first: `hello.ok`, then the handler's replay. Until that is
+/// queued, what `broadcast` and `sendToOne` address to it is held and follows the greeting in order, so a live
+/// event never reaches a device ahead of (or in the middle of) the replay it has to come after.
 public final class StreamHub: StreamEndpoint, StreamOutbox, @unchecked Sendable {
-    private struct Client { var socket: WebSocketConnection; var device: PairedDevice; var helloAt: Date }
+    private struct Client {
+        var socket: WebSocketConnection
+        var device: PairedDevice
+        var helloAt: Date
+        /// While the client is being greeted, what was addressed to it meanwhile; nil once it is live.
+        var held: [Data]?
+    }
 
     private let devices: DeviceStore
     private let log: BridgeLog?
@@ -66,14 +77,27 @@ public final class StreamHub: StreamEndpoint, StreamOutbox, @unchecked Sendable 
     public var hasClients: Bool { lock.lock(); defer { lock.unlock() }; return !clients.isEmpty }
 
     public func broadcast(_ message: JSONValue) {
-        let data = message.encoded()
-        for socket in current().map(\.socket) { socket.send(data) }
+        deliver(message.encoded(), to: current())
     }
 
     @discardableResult public func sendToOne(_ message: JSONValue) -> Bool {
         guard let newest = current().max(by: { $0.helloAt < $1.helloAt }) else { return false }
-        newest.socket.send(message.encoded())
+        deliver(message.encoded(), to: [newest])
         return true
+    }
+
+    /// Sends to the live clients and holds the message for any still being greeted. The choice between the
+    /// two is made under the lock, the same lock `finishGreeting` flushes under, so nothing sent after a
+    /// client goes live can overtake what was held for it.
+    private func deliver(_ data: Data, to targets: [Client]) {
+        var live: [WebSocketConnection] = []
+        lock.lock()
+        for target in targets {
+            guard let client = clients[target.socket.id] else { continue }
+            if client.held != nil { clients[target.socket.id]?.held?.append(data) } else { live.append(client.socket) }
+        }
+        lock.unlock()
+        for socket in live { socket.send(data) }
     }
 
     /// Clients whose device is still paired. A revoked device's streams are closed here, so revocation
@@ -119,12 +143,25 @@ public final class StreamHub: StreamEndpoint, StreamOutbox, @unchecked Sendable 
         }
         lock.lock()
         waiting[socket.id] = nil
-        clients[socket.id] = Client(socket: socket, device: device, helloAt: Date())
+        clients[socket.id] = Client(socket: socket, device: device, helloAt: Date(), held: [])
         lock.unlock()
         log?.info("stream open for device \(device.id)")
-        guard let handler else { return }
-        socket.send(handler.helloOK(for: device).encoded())
-        handler.connected(device: device, cursors: hello.cursors ?? [:]) { [weak socket] message in socket?.send(message.encoded()) }
+        // No lock is held while the handler runs: `connected` takes locks whose holders broadcast.
+        if let handler {
+            socket.send(handler.helloOK(for: device).encoded())
+            handler.connected(device: device, cursors: hello.cursors ?? [:]) { [weak socket] message in socket?.send(message.encoded()) }
+        }
+        finishGreeting(socket)
+    }
+
+    /// The greeting has been queued: send what was held, in order, and let later messages go straight out.
+    /// `send` only queues a write on the server's serial queue, so doing it under the lock is cheap, and it
+    /// keeps a broadcast that sees the client live from being queued ahead of the held messages.
+    private func finishGreeting(_ socket: WebSocketConnection) {
+        lock.lock(); defer { lock.unlock() }
+        guard let held = clients[socket.id]?.held else { return }
+        for data in held { socket.send(data) }
+        clients[socket.id]?.held = nil
     }
 
     private func closed(_ socket: WebSocketConnection) {

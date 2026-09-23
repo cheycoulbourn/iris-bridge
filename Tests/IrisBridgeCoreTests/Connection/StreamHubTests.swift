@@ -17,6 +17,27 @@ private final class EchoHandler: StreamHandler {
     func disconnected(device: PairedDevice) { disconnects += 1 }
 }
 
+/// A greeting that another thread interrupts: while hello.ok and the replay are being sent, a turn streaming
+/// elsewhere broadcasts and sends to one device, synchronously, from its own queue.
+private final class InterruptedGreeting: StreamHandler {
+    weak var hub: StreamHub?
+    private let elsewhere = DispatchQueue(label: "a turn on another thread")
+    func helloOK(for device: PairedDevice) -> JSONValue {
+        elsewhere.sync { hub?.broadcast(["type": "live", "n": 1]) }
+        return HelperMessage.helloOK(helperVersion: "test", capabilities: ["v3"], health: [:])
+    }
+    func connected(device: PairedDevice, cursors: [String: Int], send: @escaping (JSONValue) -> Void) {
+        send(["type": "replay", "n": 1])
+        elsewhere.sync {
+            hub?.broadcast(["type": "live", "n": 2])
+            _ = hub?.sendToOne(["type": "live", "n": 3])
+        }
+        send(["type": "replay", "n": 2])
+    }
+    func received(_ message: AppMessage, from device: PairedDevice) {}
+    func disconnected(device: PairedDevice) {}
+}
+
 final class StreamHubTests: XCTestCase {
     private var live: LiveTestServer!
     private var handler: EchoHandler!
@@ -74,6 +95,33 @@ final class StreamHubTests: XCTestCase {
         for device in live.devices.all { _ = try live.devices.revoke(id: device.id) }
         live.hub.broadcast(["type": "health.changed"])
         XCTAssertEqual(closeCode(task), 4401)
+    }
+
+    /// The hub checks the device again before a message reaches the handler, so a revoked phone whose stream
+    /// is still open cannot answer an approval, send a turn or push a snapshot.
+    func testARevokedDevicesMessageIsRefusedBeforeTheHandlerSeesIt() throws {
+        let task = open()
+        sendText(task, #"{"type":"hello","deviceToken":"\#(live.token)","protocol":3}"#)
+        XCTAssertEqual(receiveMessages(task, count: 2).count, 2)
+        for device in live.devices.all { _ = try live.devices.revoke(id: device.id) }
+        sendText(task, #"{"type":"turn.cancel","threadId":"8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77","turnId":"t1"}"#)
+        XCTAssertEqual(closeCode(task), 4401)
+        XCTAssertEqual(handler.received, [])
+    }
+
+    /// A new stream hears hello.ok, then everything the handler replays, and only then what was broadcast or
+    /// sent to one device while it was being greeted, so a live event never lands before or inside the replay.
+    func testWhatIsSentDuringTheGreetingWaitsForHelloOKAndTheReplay() {
+        let greeting = InterruptedGreeting()
+        greeting.hub = live.hub
+        live.hub.handler = greeting
+        let task = open()
+        sendText(task, #"{"type":"hello","deviceToken":"\#(live.token)","protocol":3,"cursors":{"a":40}}"#)
+        let order = receiveMessages(task, count: 6).map { "\($0["type"]?.stringValue ?? "?") \($0["n"]?.intValue ?? 0)" }
+        XCTAssertEqual(order, ["hello.ok 0", "replay 1", "replay 2", "live 1", "live 2", "live 3"])
+        live.hub.broadcast(["type": "live", "n": 4])
+        XCTAssertEqual(receiveMessages(task, count: 1).first?["n"]?.intValue, 4)
+        task.cancel(with: .normalClosure, reason: nil)
     }
 
     /// The v2 endpoints share the port with the stream and keep answering plain HTTP.

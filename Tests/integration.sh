@@ -3,6 +3,12 @@
 set -eu
 ROOT=$(mktemp -d)
 PORT=$(( 20000 + $(od -An -N2 -tu2 /dev/urandom | tr -d ' ') % 20000 ))
+# Nothing in 0.3.0 creates v2 submissions; the v2 Inbox serves what 0.2.x saved. Two of those, one with a title
+# an agent wrote with a newline and a colour escape in it, are on disk before the helper starts.
+cat >"$ROOT/inbox.json" <<'INBOX'
+[{"agent":"claude-code","createdAt":"2026-09-16T10:00:00Z","id":"sub_aaaaaaaaaaaa","kind":"post","note":"Ready for you.","post":{"format":"Reel","hook":"Do this once","pillar":"Craft","platform":"Instagram","title":"Three shots"},"status":"pending"},
+ {"agent":"claude-code","createdAt":"2026-09-16T10:05:00Z","id":"sub_bbbbbbbbbbbb","kind":"post","post":{"format":"Reel","pillar":"Craft","platform":"Instagram","title":"Two\nlines\u001b[31m here"},"status":"pending"}]
+INBOX
 STUBS="$(pwd)/Tests/stubs"
 export PATH="$STUBS:$PATH"
 # ProviderService.findExecutable looks in ~/.local/bin and /Applications before PATH, so the stubs are
@@ -62,18 +68,19 @@ printf '%s' "$FAILED" | grep -q '"provider":"claude"'
 printf '%s' "$FAILED" | grep -q 'session limit'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/cancel" -d '{"id":"m9"}' | grep -q '"canceled":true'
 curl -sk -o /dev/null -w '%{http_code}' -H "Origin: https://evil.example" "https://127.0.0.1:$PORT/status" | grep -q '403'
-# Before the app has ever pushed a snapshot, the context tool says so rather than inventing a workspace for
-# the agent to plan against.
+# Before the app has ever pushed anything, the read tools say so rather than inventing a workspace for the
+# agent to plan against.
 NO_CONTEXT=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>"$ROOT/mcp.err" <<'JSONRPC'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_workspace_summary","arguments":{}}}
 JSONRPC
 )
-printf '%s' "$NO_CONTEXT" | grep -q 'No workspace context yet. Open Iris on a paired device.'
+printf '%s' "$NO_CONTEXT" | grep -q 'Iris has not shared its workspace with this Mac yet.'
 printf '%s' "$NO_CONTEXT" | grep -q '"isError":true'
+# An app older than the v3 chat pushes its v2 context; the read tools answer from it.
 curl -sk -X PUT -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/context" \
   -d '{"creatorName":"Chey","pillars":[{"name":"Craft","detail":"How it is made","isAnchor":true,"weekdays":[2,4]}],"platforms":[{"name":"Instagram","formats":["Reel","Carousel"],"weeklyGoal":3}],"series":[],"creatorContext":"Speaks plainly.","updatedAt":"2026-09-16T10:00:00Z"}' | grep -q '"saved":true'
 CONTEXT=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_workspace_summary","arguments":{}}}
 JSONRPC
 )
 printf '%s' "$CONTEXT" | grep -q 'Craft'
@@ -82,59 +89,40 @@ printf '%s' "$CONTEXT" | grep -q 'Carousel'
 printf '%s' "$CONTEXT" | grep -q 'Speaks plainly.'
 
 # The MCP server, driven the way Claude Code drives it: newline-delimited JSON-RPC on stdin, one answer per
-# request on stdout, nothing for the notification, and logs kept off stdout entirely.
+# request on stdout, nothing for the notification, and logs kept off stdout entirely. With no app connected, a
+# change waits on this Mac.
 MCP_OUT=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>"$ROOT/mcp.err" <<'JSONRPC'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"claude-code","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"iris_submit_post","arguments":{"title":"Three shots","pillar":"Craft","platform":"Instagram","format":"Reel","hook":"Do this once","note":"Ready for you."}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"iris_create_task","arguments":{"title":"Film the intro"}}}
 JSONRPC
 )
 printf '%s' "$MCP_OUT" | grep -q '"protocolVersion":"2025-06-18"'
-printf '%s' "$MCP_OUT" | grep -q 'iris_submit_series'
-printf '%s' "$MCP_OUT" | grep -q 'Sent to Iris for review.'
+printf '%s' "$MCP_OUT" | grep -q 'iris_create_post_draft'
+if printf '%s' "$MCP_OUT" | grep -q 'iris_submit_post'; then echo "MCP: a v0.2.x tool name is still listed"; exit 1; fi
+if printf '%s' "$MCP_OUT" | grep -q '"name":"approval"'; then echo "MCP: a terminal agent was offered the approval tool"; exit 1; fi
+printf '%s' "$MCP_OUT" | grep -q 'queued_until_iris_connects'
 LINES=$(printf '%s\n' "$MCP_OUT" | wc -l | tr -d ' ')
 [ "$LINES" = 3 ] || { echo "MCP: expected 3 replies (the notification gets none), got $LINES"; exit 1; }
 # A single stray print on stdout breaks the JSON-RPC stream for the whole session, so every line is checked
 # to be a JSON object rather than the assertions above merely finding what they looked for somewhere in it.
 if printf '%s\n' "$MCP_OUT" | grep -qv '^{'; then echo "MCP: something that is not JSON was written to stdout"; exit 1; fi
-# Submitted over loopback, and visible to this Mac's own admin endpoint straight away.
-ADMIN_INBOX=$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/inbox")
-SUB=$(printf '%s' "$ADMIN_INBOX" | python3 -c 'import json,sys;a=json.load(sys.stdin);print(a[0]["id"] if a else "")')
-test -n "$SUB"
-printf '%s' "$ADMIN_INBOX" | grep -q '"title":"Three shots"'
-# The agent name comes from the MCP client that connected, not from a hard-coded string.
-printf '%s' "$ADMIN_INBOX" | grep -q '"agent":"claude-code"'
+# The change waits in actions.json, attributed to the agent that connected.
+grep -q '"name":"iris_create_task"' "$ROOT/actions.json"
+grep -q '"agent":"claude"' "$ROOT/actions.json"
+# A chat session's MCP server (started with --thread) also lists the approval tool; a bad thread id is refused.
+"$BIN" mcp --root "$ROOT" --port "$PORT" --thread 8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77 2>/dev/null <<'JSONRPC' | grep -q '"name":"approval"'
+{"jsonrpc":"2.0","id":2,"method":"tools/list"}
+JSONRPC
+if "$BIN" mcp --root "$ROOT" --port "$PORT" --thread ../x </dev/null >/dev/null 2>&1; then echo "mcp accepted a bad --thread"; exit 1; fi
+# The saved v2 Inbox is still listed, one line per submission whatever an agent put in its title.
 INBOX_CLI=$("$BIN" inbox --root "$ROOT" --port "$PORT")
-printf '%s' "$INBOX_CLI" | grep -q "$SUB"
+printf '%s' "$INBOX_CLI" | grep -q 'sub_aaaaaaaaaaaa'
 printf '%s' "$INBOX_CLI" | grep -q 'Three shots'
-# Titles are written by an agent. One with a newline and a colour escape in it still prints as a single row:
-# a wrapped title would look like submissions nobody sent, and the escape would repaint the Terminal.
-NOISY=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_submit_post","arguments":{"title":"Two\nlines\u001b[31m here","pillar":"Craft","platform":"Instagram","format":"Reel"}}}
-JSONRPC
-)
-printf '%s' "$NOISY" | grep -q 'Sent to Iris for review.'
-NOISY_CLI=$("$BIN" inbox --root "$ROOT" --port "$PORT")
-NOISY_LINES=$(printf '%s\n' "$NOISY_CLI" | wc -l | tr -d ' ')
-[ "$NOISY_LINES" = 2 ] || { echo "inbox: expected one line per submission, got $NOISY_LINES"; exit 1; }
-printf '%s' "$NOISY_CLI" | grep -q 'Two lines here'
-# A revision cannot carry a post and a series at once: the kind decides which side is length-checked, so
-# sending both walked the unchecked one straight past the 24,000-character cap.
-BOTH=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<JSONRPC
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_revise_submission","arguments":{"id":"$SUB","post":{"title":"x","pillar":"Craft","platform":"Instagram","format":"Reel"},"series":{"name":"s","pillar":"Craft","episodes":[{"number":1,"post":{"title":"y","pillar":"Craft","platform":"Instagram","format":"Reel"}}]}}}}
-JSONRPC
-)
-printf '%s' "$BOTH" | grep -q 'Send either a post or a series, not both.'
-printf '%s' "$BOTH" | grep -q '"isError":true'
-# A revision of something the helper has never seen is refused before it is submitted, so a typo cannot
-# leave a submission in the Inbox pointing at nothing.
-REVISE=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>>"$ROOT/mcp.err" <<'JSONRPC'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_revise_submission","arguments":{"id":"sub_zzzzzzzzzzzz","post":{"title":"x","pillar":"Craft","platform":"Instagram","format":"Reel"}}}}
-JSONRPC
-)
-printf '%s' "$REVISE" | grep -q 'That submission was not found.'
-printf '%s' "$REVISE" | grep -q '"isError":true'
+printf '%s' "$INBOX_CLI" | grep -q 'Two lines here'
+INBOX_LINES=$(printf '%s\n' "$INBOX_CLI" | wc -l | tr -d ' ')
+[ "$INBOX_LINES" = 2 ] || { echo "inbox: expected one line per submission, got $INBOX_LINES"; exit 1; }
 "$BIN" inbox clear-decided --root "$ROOT" --port "$PORT" | grep -q 'Removed 0 decided submissions older than 30 days.'
 test "$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/inbox" | python3 -c 'import json,sys;print(len(json.load(sys.stdin)))')" = 2
 ID=$(curl -sk -H "Authorization: Bearer $ADMIN" "https://127.0.0.1:$PORT/admin/devices" | python3 -c 'import json,sys;print(json.load(sys.stdin)["devices"][0]["id"])')
@@ -147,13 +135,13 @@ if grep -qF -- "hello" "$ROOT/serve.log"; then echo "LEAK: prompt text found in 
 # has stopped, rather than one sentence for both.
 EMPTY=$(mktemp -d)
 NOT_SET_UP=$("$BIN" mcp --root "$EMPTY" --port "$PORT" 2>/dev/null <<'JSONRPC'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_workspace_summary","arguments":{}}}
 JSONRPC
 )
 printf '%s' "$NOT_SET_UP" | grep -q 'not set up on this Mac'
 kill "$PID"; wait "$PID" 2>/dev/null || true
 NOT_RUNNING=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>/dev/null <<'JSONRPC'
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_workspace_summary","arguments":{}}}
 JSONRPC
 )
 printf '%s' "$NOT_RUNNING" | grep -q 'Iris Bridge is not running.'

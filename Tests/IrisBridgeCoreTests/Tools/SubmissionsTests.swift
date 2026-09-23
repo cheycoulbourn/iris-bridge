@@ -401,3 +401,44 @@ private func XCTAssertThrowsErrorReturning(_ body: () throws -> Void, file: Stat
         return error
     }
 }
+
+/// What `iris-bridge inbox` prints for a submission: one clean line with its age.
+final class SubmissionListingTests: XCTestCase {
+    func testALongTitleIsCutToEightyCharactersWithAnEllipsis() {
+        let submission = Submission(id: "sub_aaaaaaaaaaaa", kind: .post,
+                                    post: SubmittedPost(title: String(repeating: "a", count: 200),
+                                                        pillar: "Craft", platform: "Instagram", format: "Reel"),
+                                    agent: "claude", createdAt: Date())
+        XCTAssertEqual(submission.listTitle.count, 80)
+        XCTAssertTrue(submission.listTitle.hasSuffix("…"), submission.listTitle)
+    }
+
+    func testAShortPlainTitleIsLeftExactlyAsItIs() {
+        XCTAssertEqual(OneLineText.clean("Three shots", limit: 80), "Three shots")
+        XCTAssertEqual(OneLineText.clean("  spaced out  ", limit: 80), "spaced out")
+        XCTAssertEqual(OneLineText.clean("\u{1B}]0;title\u{07}after", limit: 80), "after")
+        XCTAssertEqual(OneLineText.clean(String(repeating: "b", count: 80), limit: 80).count, 80)
+    }
+
+    func testSubmissionAgeReadsAsMinutesHoursOrDays() {
+        let now = Date(timeIntervalSince1970: 100_000_000)
+        func age(_ seconds: TimeInterval) -> String {
+            Submission(id: "sub_aaaaaaaaaaaa", kind: .post, agent: "claude",
+                       createdAt: now.addingTimeInterval(-seconds)).ageText(now: now)
+        }
+        XCTAssertEqual(age(30), "0m")
+        XCTAssertEqual(age(3 * 60), "3m")
+        XCTAssertEqual(age(2 * 60 * 60), "2h")
+        XCTAssertEqual(age(26 * 60 * 60), "1d")
+    }
+
+    func testSubmissionTitleFallsBackToTheSeriesNameThenToTheKind() {
+        XCTAssertEqual(Submission(id: "sub_aaaaaaaaaaaa", kind: .post,
+                                  post: SubmittedPost(title: "Three shots", pillar: "Craft", platform: "Instagram", format: "Reel"),
+                                  agent: "claude", createdAt: Date()).displayTitle, "Three shots")
+        XCTAssertEqual(Submission(id: "sub_aaaaaaaaaaaa", kind: .series,
+                                  series: SubmittedSeries(name: "Quiet mornings", pillar: "Craft", episodes: []),
+                                  agent: "claude", createdAt: Date()).displayTitle, "Quiet mornings")
+        XCTAssertEqual(Submission(id: "sub_aaaaaaaaaaaa", kind: .post, agent: "claude", createdAt: Date()).displayTitle, "Untitled post")
+    }
+}

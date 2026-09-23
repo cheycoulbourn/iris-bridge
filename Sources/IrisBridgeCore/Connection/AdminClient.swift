@@ -45,25 +45,6 @@ public enum AdminClientError: Error, Equatable, LocalizedError {
     }
 }
 
-/// What the MCP server needs from the running helper. A protocol so the tools can be tested without a
-/// listening socket — including the case where there is deliberately nothing to listen to.
-public protocol AdminClientProtocol: AnyObject {
-    func submit(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?,
-                agent: String, note: String?, revisionOf: String?) throws -> Submission
-    func listSubmissions(status: String) throws -> [Submission]
-    func context() throws -> WorkspaceContext
-    func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission
-}
-
-/// Planner cleanup was added after the original Inbox protocol. Keeping an explicit unsupported default lets
-/// old test doubles and embedding clients continue to compile while an older running helper gives a useful
-/// answer instead of silently treating an archive proposal as a normal post.
-public extension AdminClientProtocol {
-    func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
-        throw BridgeError.message("This Iris Bridge does not support archive proposals. Update Iris Bridge, then try again.")
-    }
-}
-
 public final class AdminClient {
     private let base: URL
     private let token: String
@@ -80,9 +61,9 @@ public final class AdminClient {
 
     /// The raw reply. `path` may carry a query string, which is why the URL is built from a string rather
     /// than `appendingPathComponent`, which would percent-escape the `?`.
-    private func callData(_ method: String, _ path: String, body: Data? = nil) throws -> (Int, Data) {
+    private func callData(_ method: String, _ path: String, body: Data? = nil, timeout: TimeInterval = 5) throws -> (Int, Data) {
         var request = URLRequest(url: URL(string: base.absoluteString + path) ?? base.appendingPathComponent(path))
-        request.httpMethod = method; request.timeoutInterval = 5
+        request.httpMethod = method; request.timeoutInterval = timeout
         request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         if let body {
             request.httpBody = body
@@ -242,28 +223,13 @@ public final class AdminClient {
         let body = try expect200("POST", "/admin/inbox/prune", while: "clear decided submissions")
         return body["removed"] as? Int ?? 0
     }
-}
 
-extension AdminClient: AdminClientProtocol {}
-
-/// The MCP server's way in. It builds an `AdminClient` per call rather than holding one, because the helper
-/// can be installed, started or restarted while Claude Code keeps the same MCP process alive for hours: a
-/// client captured at launch would keep reporting a Mac that has since come back.
-public final class LoopbackAdminClient: AdminClientProtocol {
-    private let paths: BridgePaths
-    private let port: UInt16
-    public init(paths: BridgePaths, port: UInt16) { self.paths = paths; self.port = port }
-
-    /// Built per call; a construction failure is already an `AdminClientError` that says which problem it is.
-    private func client() throws -> AdminClient { try AdminClient(paths: paths, port: port) }
-
-    public func submit(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?,
-                       agent: String, note: String?, revisionOf: String?) throws -> Submission {
-        try client().submit(kind: kind, post: post, series: series, agent: agent, note: note, revisionOf: revisionOf)
-    }
-    public func listSubmissions(status: String) throws -> [Submission] { try client().listSubmissions(status: status) }
-    public func context() throws -> WorkspaceContext { try client().context() }
-    public func submitArchive(_ proposal: ArchiveProposal, agent: String) throws -> Submission {
-        try client().submitArchive(proposal, agent: agent)
+    /// One Iris tool call, answered by the running helper's `ToolService` (contract §8).
+    public func callTool(_ body: Data, timeout: TimeInterval) throws -> JSONValue {
+        let (status, data) = try callData("POST", "/admin/v3/tool", body: body, timeout: timeout)
+        guard status == 200, let result = try? JSONValue.decode(data), result["content"] != nil else {
+            throw Self.statusError(status, ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any]) ?? [:], while: "run that tool")
+        }
+        return result
     }
 }

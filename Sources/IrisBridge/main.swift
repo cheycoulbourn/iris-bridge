@@ -133,7 +133,9 @@ do {
         // the other end of that pipe, a client that closes it early must end this process at EOF rather than
         // kill it with SIGPIPE part-way through a reply.
         MCPServer.ignoreBrokenPipe()
-        let server = MCPServer(client: LoopbackAdminClient(paths: paths, port: port), version: BridgeVersion.current)
+        let thread = line.options["--thread"]
+        if let thread, !StreamIdentifiers.isThreadID(thread) { refuse("--thread must be a chat thread id.") }
+        let server = MCPServer(client: LoopbackToolClient(paths: paths, port: port), version: BridgeVersion.current, threadId: thread)
         try server.run(transport: StdioMCPTransport())
     case "install-agent":
         guard let typed = line.options["--binary"] else { refuse("Usage: iris-bridge install-agent --binary <path>") }

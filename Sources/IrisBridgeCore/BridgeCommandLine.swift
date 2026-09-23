@@ -7,7 +7,7 @@ import Foundation
 /// revoke a device called `--root`. An option's value is never mistaken for a positional argument.
 public struct BridgeCommandLine: Equatable {
     /// Options that consume the next argument as their value.
-    public static let valueOptions: Set<String> = ["--root", "--port", "--binary"]
+    public static let valueOptions: Set<String> = ["--root", "--port", "--binary", "--thread"]
     /// Valueless switches the helper understands. Anything else starting with `-` is a typo, and a typo that
     /// is quietly ignored is worse than an error: `status --prot 48797` would talk to the default port.
     public static let knownFlags: Set<String> = ["--no-bonjour"]

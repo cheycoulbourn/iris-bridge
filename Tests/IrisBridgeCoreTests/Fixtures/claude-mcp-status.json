@@ -9,6 +9,8 @@
              {"name": "send_message", "annotations": {"openWorld": true}}, {"name": "trash_thread", "annotations": {"destructive": true}}]},
   {"name": "claude.ai Google Calendar", "status": "connected", "serverInfo": {"name": "gcal", "version": "1"}, "config": {"type": "claudeai-proxy", "url": "https://example.com/gcal", "id": "srv_gcal"}, "scope": "claudeai", "source": "claudeai",
    "tools": [{"name": "list_events", "annotations": {"readOnly": true}}, {"name": "list_calendars", "annotations": {"readOnly": true}},
-             {"name": "create_event", "annotations": {}}, {"name": "delete_event", "annotations": {"destructive": true}}]},
+             {"name": "create_event", "annotations": {}}, {"name": "delete_event", "annotations": {"destructive": true}},
+             {"name": "suggest_time", "annotations": {"readOnly": true}}, {"name": "createEventFromTemplate", "annotations": {"readOnly": true}},
+             {"name": "fetch_and_clear_reminders", "annotations": {"destructive": true}}]},
   {"name": "claude.ai Notion", "status": "needs-auth", "config": {"type": "claudeai-proxy", "url": "https://example.com/notion", "id": "srv_notion"}, "scope": "claudeai", "source": "claudeai"}
 ]}

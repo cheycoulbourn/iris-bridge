@@ -25,10 +25,34 @@ public enum ToolClassifier {
         if toolName.hasPrefix("mcp__iris__") { return .iris }
         guard let (connector, tool) = connectors.connector(forTool: toolName) else { return .other }
         if let annotations = connector.tools[tool] {
-            if annotations.readOnly { return .connectorRead(connector, tool: tool) }
+            // Annotations come from the connector's own server, so a read-only claim is believed only when the
+            // name does not lead with a write: a connector has been seen marking a `create…FromTemplate` tool
+            // readOnly while it creates something. A destructive claim is always believed.
+            if annotations.readOnly {
+                return leadsWithWrite(tool) ? .connectorWrite(connector, tool: tool) : .connectorRead(connector, tool: tool)
+            }
             if annotations.destructive { return .connectorWrite(connector, tool: tool) }
         }
         return isReadByName(tool) ? .connectorRead(connector, tool: tool) : .connectorWrite(connector, tool: tool)
+    }
+
+    /// The verbs a name leads with: its first read or write word, and any read or write word joined to that by
+    /// "or" or "and" ("get_or_create_label" → get, create). Words further on are left out because they are
+    /// often nouns ("get_queue_schedule", "list_social_set_posts").
+    static func leadingVerbs(_ name: String) -> [String] {
+        let words = words(name)
+        let verbs = readWords.union(writeWords)
+        guard var index = words.firstIndex(where: verbs.contains) else { return [] }
+        var leading = [words[index]]
+        while index + 2 < words.count, words[index + 1] == "or" || words[index + 1] == "and", verbs.contains(words[index + 2]) {
+            leading.append(words[index + 2])
+            index += 2
+        }
+        return leading
+    }
+
+    static func leadsWithWrite(_ name: String) -> Bool {
+        leadingVerbs(name).contains(where: writeWords.contains)
     }
 
     /// Words of a tool name, split at `_`, `-`, `.`, spaces and lowerCamel humps, lower-cased.

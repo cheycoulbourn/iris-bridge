@@ -31,4 +31,4 @@ or connector content from the owner's Mac is in any of them.
 
 | Fixture | Provenance |
 |---|---|
-| `claude-mcp-status.json` | Shape recorded by spike run q2-f (`mcpServers` with `name`, `status`, `scope`, `source`, `config`, `tools` with Claude Code's `annotations`). Servers are fictional apart from connector and tool names that are public. |
+| `claude-mcp-status.json` | Shape recorded by spike run q2-f (`mcpServers` with `name`, `status`, `scope`, `source`, `config`, `tools` with Claude Code's `annotations`). Servers are fictional apart from connector and tool names that are public. Two Google Calendar tools are made up to test the approval rules against annotations: `createEventFromTemplate` (marked readOnly, as a real connector marks a tool that creates something) and `fetch_and_clear_reminders` (marked destructive, with a name that reads like a read). |

@@ -36,9 +36,36 @@ final class ToolClassifierTests: XCTestCase {
         guard case .connectorWrite = ToolClassifier.classify("mcp__claude_ai_Gmail__trash_thread", connectors: table) else { return XCTFail("destructive") }
         guard case .connectorWrite = ToolClassifier.classify("mcp__claude_ai_Gmail__send_message", connectors: table) else { return XCTFail("openWorld is not read-only") }
         guard case .connectorWrite = ToolClassifier.classify("mcp__claude_ai_Gmail__summarize_inbox", connectors: table) else { return XCTFail("unrecognised is a write") }
+        // Each annotation against a name that says the opposite.
+        XCTAssertFalse(ToolClassifier.isReadByName("suggest_time"))
+        guard case .connectorRead = ToolClassifier.classify("mcp__claude_ai_Google_Calendar__suggest_time", connectors: table) else { return XCTFail("readOnly beats a name with no read word") }
+        XCTAssertTrue(ToolClassifier.isReadByName("fetch_and_clear_reminders"))
+        guard case .connectorWrite = ToolClassifier.classify("mcp__claude_ai_Google_Calendar__fetch_and_clear_reminders", connectors: table) else { return XCTFail("destructive beats a read-like name") }
         XCTAssertEqual(ToolClassifier.classify("mcp__localtools__run_anything", connectors: table), .other)
         XCTAssertEqual(ToolClassifier.classify("mcp__iris__approval", connectors: table), .other, "the model may not call the permission tool itself")
         XCTAssertEqual(ToolClassifier.classify("Bash", connectors: table), .other)
+    }
+
+    func testAReadOnlyClaimCountsOnlyWhenTheNameDoesNotLeadWithAWrite() {
+        let calendar = table.connectors[1]
+        XCTAssertEqual(ToolClassifier.classify("mcp__claude_ai_Google_Calendar__createEventFromTemplate", connectors: table),
+                       .connectorWrite(calendar, tool: "createEventFromTemplate"), "a connector's readOnly on a tool that creates is not believed")
+        let planner = ConnectorTable(mcpStatus: ["mcpServers": [["name": "claude.ai Planner", "status": "connected", "scope": "claudeai", "tools": [
+            ["name": "get_queue_schedule", "annotations": ["readOnly": true]],
+            ["name": "list_social_set_posts", "annotations": ["readOnly": true]],
+            ["name": "get_or_create_label", "annotations": ["readOnly": true]],
+            ["name": "archiveOldPosts", "annotations": ["readOnly": true]],
+        ]]]])
+        func classify(_ tool: String) -> ToolClass { ToolClassifier.classify("mcp__claude_ai_Planner__" + tool, connectors: planner) }
+        let connector = planner.connectors[0]
+        XCTAssertEqual(classify("get_queue_schedule"), .connectorRead(connector, tool: "get_queue_schedule"), "a write word after the verb is a noun")
+        XCTAssertEqual(classify("list_social_set_posts"), .connectorRead(connector, tool: "list_social_set_posts"))
+        XCTAssertEqual(classify("get_or_create_label"), .connectorWrite(connector, tool: "get_or_create_label"), "'or create' is a second verb")
+        XCTAssertEqual(classify("archiveOldPosts"), .connectorWrite(connector, tool: "archiveOldPosts"))
+        XCTAssertEqual(ToolClassifier.leadingVerbs("createEventFromTemplate"), ["create"])
+        XCTAssertEqual(ToolClassifier.leadingVerbs("search_public_and_private"), ["search"])
+        XCTAssertEqual(ToolClassifier.leadingVerbs("fetch_and_update_or_delete"), ["fetch", "update", "delete"])
+        XCTAssertEqual(ToolClassifier.leadingVerbs("suggest_time"), [])
     }
 
     func testTheNameRuleReadsWordsNotLetters() {
@@ -66,12 +93,24 @@ final class ApprovalPolicyTests: XCTestCase {
         XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Google_Calendar__list_events", input: [:], turn: turn(command: ["claude_ai_Google_Calendar"])), .allow)
         XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Google_Calendar__list_events", input: [:], turn: turn(mentions: ["claude_ai_Gmail"])),
                        .deny("Reading Google Calendar needs the creator to mention it with @Google Calendar in their message. Ask them to, or answer without it."))
+        XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Google_Calendar__suggest_time", input: [:], turn: turn(mentions: ["claude_ai_Google_Calendar"])), .allow,
+                       "annotated read-only, though its name has no read word")
+        XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Google_Calendar__suggest_time", input: [:], turn: turn()),
+                       .deny("Reading Google Calendar needs the creator to mention it with @Google Calendar in their message. Ask them to, or answer without it."))
     }
 
     func testConnectorWritesAskEvenWhenMentionedAndOthersAreRefused() {
         let input: JSONValue = ["to": "sam@example.com", "subject": "Shoot moved"]
         XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Gmail__send_message", input: input, turn: turn(mentions: ["claude_ai_Gmail"])),
                        .ask(kind: "connectorWrite", summary: "Gmail: send message", detail: ["connector": "Gmail", "tool": "send_message", "input": input]))
+        let mentioned = turn(mentions: ["claude_ai_Google_Calendar"])
+        XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Google_Calendar__createEventFromTemplate", input: ["template": "Shoot day"], turn: mentioned),
+                       .ask(kind: "connectorWrite", summary: "Google Calendar: create event from template",
+                            detail: ["connector": "Google Calendar", "tool": "createEventFromTemplate", "input": ["template": "Shoot day"]]),
+                       "marked readOnly by its connector, and still asks")
+        XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__claude_ai_Google_Calendar__fetch_and_clear_reminders", input: [:], turn: mentioned),
+                       .ask(kind: "connectorWrite", summary: "Google Calendar: fetch and clear reminders",
+                            detail: ["connector": "Google Calendar", "tool": "fetch_and_clear_reminders", "input": [:]]))
         XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__localtools__run_anything", input: [:], turn: turn()), .deny("That tool is not available in Iris chat."))
         XCTAssertEqual(ApprovalPolicy.decide(toolName: "mcp__iris__iris_create_task", input: [:], turn: nil), .deny("This chat has no message being answered, so no tool can run."))
     }

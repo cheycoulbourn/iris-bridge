@@ -143,4 +143,18 @@ curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN
 grep -q "paired device" "$ROOT/logs/bridge.log"
 if grep -qF -- "hello" "$ROOT/logs/bridge.log"; then echo "LEAK: prompt text found in logs/bridge.log"; exit 1; fi
 if grep -qF -- "hello" "$ROOT/serve.log"; then echo "LEAK: prompt text found in serve.log"; exit 1; fi
+# I7: the agent hears "not set up" for a folder nothing was ever installed in, and "not running" once the helper
+# has stopped, rather than one sentence for both.
+EMPTY=$(mktemp -d)
+NOT_SET_UP=$("$BIN" mcp --root "$EMPTY" --port "$PORT" 2>/dev/null <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+JSONRPC
+)
+printf '%s' "$NOT_SET_UP" | grep -q 'not set up on this Mac'
+kill "$PID"; wait "$PID" 2>/dev/null || true
+NOT_RUNNING=$("$BIN" mcp --root "$ROOT" --port "$PORT" 2>/dev/null <<'JSONRPC'
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"iris_get_workspace_context","arguments":{}}}
+JSONRPC
+)
+printf '%s' "$NOT_RUNNING" | grep -q 'Iris Bridge is not running.'
 echo "integration: ok"

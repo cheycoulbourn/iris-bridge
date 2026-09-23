@@ -71,7 +71,6 @@ public struct MCPServer {
     /// Newest first. Both revisions use the same stdio framing, so a client pinned to the older one is
     /// answered in the version it asked for rather than told to speak a newer one.
     public static let protocolVersions = ["2025-06-18", "2024-11-05"]
-    public static let notRunning = "Iris Bridge is not running. Run `iris-bridge status` on this Mac."
 
     /// Called by `iris-bridge mcp` before the first byte is read. The client owns stdout, and a client that
     /// closes it before the last reply is written would otherwise kill this process with SIGPIPE in the middle
@@ -440,10 +439,10 @@ public struct MCPServer {
         ["content": [["type": "text", "text": body]], "isError": true]
     }
 
-    /// Tool errors are plain sentences the agent can act on, never stack traces or status codes. "Not
-    /// running" is the one case worded for the agent rather than for the person in Terminal.
+    /// Tool errors are plain sentences the agent can act on, never stack traces or status codes. A helper
+    /// that cannot be reached says which of the four ways, worded for the agent rather than for Terminal.
     private static func message(for error: Error) -> String {
-        if error is AdminClientError { return notRunning }
+        if let unreachable = error as? AdminClientError { return unreachable.agentMessage }
         let sentence = error.localizedDescription
         return sentence.isEmpty ? "Iris Bridge could not do that." : sentence
     }

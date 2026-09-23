@@ -16,9 +16,12 @@ final class AdminClientErrorTests: XCTestCase {
         XCTAssertEqual(message, "Iris Bridge is not running on this Mac. Run the install command again to start it.")
     }
 
-    func testTimeoutAlsoSaysTheHelperIsNotRunning() {
-        let message = text(AdminClient.transportError(urlError(NSURLErrorTimedOut)))
-        XCTAssertTrue(message.contains("is not running on this Mac"), message)
+    /// A helper that accepted the connection and then said nothing is running but busy or wedged: a different
+    /// problem from nothing listening, with a different next step.
+    func testTimeoutSaysTheHelperDidNotAnswer() {
+        let error = AdminClient.transportError(urlError(NSURLErrorTimedOut))
+        XCTAssertEqual(error as? AdminClientError, .timedOut)
+        XCTAssertEqual(text(error), "Iris Bridge did not answer within 5 seconds. It may be busy; try again in a moment.")
     }
 
     /// The pinning delegate cancels the challenge when the fingerprint does not match, and URLSession reports
@@ -26,6 +29,7 @@ final class AdminClientErrorTests: XCTestCase {
     func testCancelledChallengeSaysTheCertificateDoesNotMatch() {
         let message = text(AdminClient.transportError(urlError(NSURLErrorCancelled)))
         XCTAssertEqual(message, "Iris Bridge's certificate does not match. Run `iris-bridge uninstall`, then install again.")
+        XCTAssertEqual(AdminClient.transportError(urlError(NSURLErrorCancelled)) as? AdminClientError, .certificateMismatch)
     }
 
     func testUntrustedCertificateSaysTheSameThing() {
@@ -53,5 +57,20 @@ final class AdminClientErrorTests: XCTestCase {
     func testServerErrorWithoutABodyStillNamesTheAction() {
         let message = text(AdminClient.statusError(503, [:], while: "create a pairing code"))
         XCTAssertEqual(message, "Iris Bridge could not create a pairing code (HTTP 503).")
+    }
+
+    /// No certificate and no admin token on disk means nothing was ever set up here, not a stopped helper.
+    func testAFolderWithNoCertificateOrTokenIsNotInstalled() {
+        let empty = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        XCTAssertThrowsError(try AdminClient(paths: BridgePaths(root: empty, logs: empty), port: 1)) {
+            XCTAssertEqual($0 as? AdminClientError, .notInstalled)
+        }
+    }
+
+    func testEveryWayOfNotReachingTheHelperIsWordedDifferentlyForTerminalAndForAnAgent() {
+        let all: [AdminClientError] = [.notInstalled, .notRunning, .timedOut, .certificateMismatch]
+        XCTAssertEqual(Set(all.map { $0.localizedDescription }).count, all.count)
+        XCTAssertEqual(Set(all.map { $0.agentMessage }).count, all.count)
+        XCTAssertEqual(AdminClientError.notRunning.agentMessage, "Iris Bridge is not running. Run `iris-bridge status` on this Mac.")
     }
 }

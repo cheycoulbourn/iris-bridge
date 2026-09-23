@@ -252,6 +252,20 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(text, "Iris Bridge is not running. Run `iris-bridge status` on this Mac.")
     }
 
+    /// I7: "not set up", "not running", "not answering" and "wrong certificate" each reach the agent as their own
+    /// sentence, because each has a different fix.
+    func testEachWayOfNotReachingTheHelperReadsDifferentlyToTheAgent() {
+        var seen = Set<String>()
+        for failure in [AdminClientError.notInstalled, .notRunning, .timedOut, .certificateMismatch] {
+            client.submitFailure = failure
+            let (text, isError) = call("iris_submit_post", samplePost)
+            XCTAssertTrue(isError)
+            XCTAssertEqual(text, failure.agentMessage)
+            seen.insert(text)
+        }
+        XCTAssertEqual(seen.count, 4)
+    }
+
     // MARK: - Arguments the agent got wrong
 
     /// A model that writes `"episode": "3"` gets told so. Dropping it silently sent a post to a series slot

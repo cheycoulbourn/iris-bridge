@@ -12,13 +12,36 @@ private final class PinnedDelegate: NSObject, URLSessionDelegate {
     }
 }
 
-/// Nothing is listening on the loopback port, or nothing is installed to listen with. Typed rather than a
-/// sentence because two callers word it differently: Terminal tells you how to start the helper, an MCP tool
-/// tells the agent to check `iris-bridge status`.
+/// Why this Mac's own helper could not be reached over loopback. Typed rather than a sentence because two
+/// callers word each case differently: Terminal tells the person what to run, and an MCP tool result tells the
+/// agent what to ask the person for (I7).
 public enum AdminClientError: Error, Equatable, LocalizedError {
+    /// No certificate or admin token on disk: nothing has been set up here.
+    case notInstalled
+    /// Nothing answered on the loopback port.
     case notRunning
+    /// Something accepted the connection and did not answer within the request timeout.
+    case timedOut
+    /// The helper that answered is not serving the certificate on disk: a stale or second install.
+    case certificateMismatch
+
     public var errorDescription: String? {
-        "Iris Bridge is not running on this Mac. Run the install command again to start it."
+        switch self {
+        case .notInstalled: return "Iris Bridge has not been set up on this Mac. Run the install command, then try again."
+        case .notRunning: return "Iris Bridge is not running on this Mac. Run the install command again to start it."
+        case .timedOut: return "Iris Bridge did not answer within 5 seconds. It may be busy; try again in a moment."
+        case .certificateMismatch: return "Iris Bridge's certificate does not match. Run `iris-bridge uninstall`, then install again."
+        }
+    }
+
+    /// The same failure, worded for an agent reading a tool result.
+    public var agentMessage: String {
+        switch self {
+        case .notInstalled: return "Iris Bridge is not set up on this Mac. Ask the creator to run the Iris Bridge install command in Terminal."
+        case .notRunning: return "Iris Bridge is not running. Run `iris-bridge status` on this Mac."
+        case .timedOut: return "Iris Bridge is running but did not answer in time. Try the tool again in a moment."
+        case .certificateMismatch: return "Iris Bridge's certificate on disk does not match the running helper. Ask the creator to run the Iris Bridge install command again."
+        }
     }
 }
 
@@ -45,11 +68,14 @@ public final class AdminClient {
     private let base: URL
     private let token: String
     private let session: URLSession
+    /// A missing or unreadable certificate or admin token means nothing usable was ever set up here.
     public init(paths: BridgePaths, port: UInt16) throws {
-        let pem = try String(contentsOf: paths.certificate, encoding: .utf8)
-        token = try String(contentsOf: paths.adminToken, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let pem = try? String(contentsOf: paths.certificate, encoding: .utf8),
+              let storedToken = try? String(contentsOf: paths.adminToken, encoding: .utf8),
+              let fingerprint = try? CertificateManager.fingerprint(pem: pem) else { throw AdminClientError.notInstalled }
+        token = storedToken.trimmingCharacters(in: .whitespacesAndNewlines)
         base = URL(string: "https://127.0.0.1:\(port)")!
-        session = URLSession(configuration: .ephemeral, delegate: PinnedDelegate(fingerprint: try CertificateManager.fingerprint(pem: pem)), delegateQueue: nil)
+        session = URLSession(configuration: .ephemeral, delegate: PinnedDelegate(fingerprint: fingerprint), delegateQueue: nil)
     }
 
     /// The raw reply. `path` may carry a query string, which is why the URL is built from a string rather
@@ -88,13 +114,15 @@ public final class AdminClient {
             return BridgeError.message("Could not reach Iris Bridge: \(error.localizedDescription)")
         }
         switch failure.code {
-        case NSURLErrorCannotConnectToHost, NSURLErrorTimedOut, NSURLErrorNetworkConnectionLost,
+        case NSURLErrorTimedOut:
+            return AdminClientError.timedOut
+        case NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
              NSURLErrorCannotFindHost, NSURLErrorNotConnectedToInternet, NSURLErrorDNSLookupFailed:
             return AdminClientError.notRunning
         case NSURLErrorCancelled, NSURLErrorServerCertificateUntrusted, NSURLErrorSecureConnectionFailed,
              NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateHasUnknownRoot,
              NSURLErrorServerCertificateNotYetValid, NSURLErrorClientCertificateRejected:
-            return BridgeError.message("Iris Bridge's certificate does not match. Run `iris-bridge uninstall`, then install again.")
+            return AdminClientError.certificateMismatch
         default:
             return BridgeError.message("Could not reach Iris Bridge: \(error.localizedDescription)")
         }
@@ -226,11 +254,8 @@ public final class LoopbackAdminClient: AdminClientProtocol {
     private let port: UInt16
     public init(paths: BridgePaths, port: UInt16) { self.paths = paths; self.port = port }
 
-    /// No certificate and no admin token on disk means nothing has ever run here, which the agent should
-    /// hear as "not running" rather than as a missing file it cannot do anything about.
-    private func client() throws -> AdminClient {
-        do { return try AdminClient(paths: paths, port: port) } catch { throw AdminClientError.notRunning }
-    }
+    /// Built per call; a construction failure is already an `AdminClientError` that says which problem it is.
+    private func client() throws -> AdminClient { try AdminClient(paths: paths, port: port) }
 
     public func submit(kind: SubmissionKind, post: SubmittedPost?, series: SubmittedSeries?,
                        agent: String, note: String?, revisionOf: String?) throws -> Submission {

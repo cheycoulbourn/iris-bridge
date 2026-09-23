@@ -253,11 +253,15 @@ final class ProvidersTests: XCTestCase {
         let runner = FakeRunner { _, _ in result(stderr: "Logged in using ChatGPT") }
         let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: catalog)
         XCTAssertThrowsError(try service.generate(MessageRequest(provider: "codex", message: "Hi", model: "gpt-custom-v1", effort: "xhigh"))) { error in
-            XCTAssertEqual(error as? BridgeError, .message("That effort is not available for the selected model."))
+            let failure = error as? ProviderFailure
+            XCTAssertEqual(failure?.cause, .modelUnavailable)
+            XCTAssertEqual(failure?.sentence(), "That effort is not available for the selected model.")
         }
         let unavailable = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, catalogLookup: { _, _ in throw BridgeError.timeout })
         XCTAssertThrowsError(try unavailable.generate(MessageRequest(provider: "codex", message: "Hi", effort: "high"))) { error in
-            XCTAssertEqual(error as? BridgeError, .message("Model choices are unavailable. Keep Automatic selected and try again."))
+            let failure = error as? ProviderFailure
+            XCTAssertEqual(failure?.cause, .providerUnavailable)
+            XCTAssertEqual(failure?.sentence(), "Model choices are unavailable. Keep Automatic selected and try again.")
         }
     }
 
@@ -385,7 +389,8 @@ final class ProvidersTests: XCTestCase {
             }
             let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" })
             XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hello"))) {
-                XCTAssertEqual($0 as? BridgeError, .message("Claude selected API-key billing. Use your Claude account sign-in and try again."))
+                XCTAssertEqual(($0 as? ProviderFailure)?.sentence(), "Claude selected API-key billing. Use your Claude account sign-in and try again.")
+                XCTAssertEqual(($0 as? ProviderFailure)?.cause, .signedOut)
             }
         }
         // A JSON null counts as absent, exactly like Python's None.
@@ -397,5 +402,53 @@ final class ProvidersTests: XCTestCase {
         }
         let output = try ProviderService(runner: nullRunner, executableLookup: { _ in "/tool" }).generate(MessageRequest(provider: "claude", message: "Hello"))
         XCTAssertEqual(output["model"] as? String, "m")
+    }
+
+    // MARK: - Real failures (I1)
+
+    func testAClaudeTurnThatFailsCarriesClaudesOwnWords() {
+        let recorded = Fixture.result("claude-session-limit")
+        let runner = FakeRunner { args, _ in
+            if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
+            return recorded
+        }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, now: { Date(timeIntervalSince1970: 1_790_172_000) })
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hello"))) { error in
+            let failure = error as? ProviderFailure
+            XCTAssertEqual(failure?.cause, .usageLimit)
+            XCTAssertEqual(failure?.provider, "claude")
+            XCTAssertEqual(failure?.resetsAt, Date(timeIntervalSince1970: 1_790_205_600))
+            XCTAssertEqual(failure?.details, "You've hit your session limit · resets 7:20pm (America/New_York)")
+        }
+    }
+
+    func testACodexTurnThatFailsCarriesCodexsOwnWords() {
+        let recorded = Fixture.result("codex-usage-limit")
+        let runner = FakeRunner { args, _ in args.contains("login") ? result(stderr: "Logged in using ChatGPT") : recorded }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" })
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "codex", message: "Hi"))) { error in
+            let failure = error as? ProviderFailure
+            XCTAssertEqual(failure?.cause, .usageLimit)
+            XCTAssertNotNil(failure?.resetsAt)
+            XCTAssertTrue(failure?.details?.hasPrefix("You’ve hit your usage limit.") ?? false)
+        }
+    }
+
+    func testASignedOutProviderFailsBeforeAnyTurnRuns() {
+        let runner = FakeRunner { _, _ in result(#"{"loggedIn":false,"authMethod":"none"}"#, status: 1) }
+        let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" })
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hello"))) { error in
+            XCTAssertEqual((error as? ProviderFailure)?.cause, .signedOut)
+        }
+        XCTAssertFalse(runner.calls.contains { $0.contains("-p") })
+    }
+
+    func testAMissingCLISaysToInstallIt() {
+        let service = ProviderService(runner: FakeRunner { _, _ in result() }, executableLookup: { _ in nil })
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hello"))) { error in
+            let failure = error as? ProviderFailure
+            XCTAssertEqual(failure?.cause, .providerUnavailable)
+            XCTAssertEqual(failure?.sentence(), "Install Claude Code on your Mac first.")
+        }
     }
 }

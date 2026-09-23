@@ -47,7 +47,12 @@ printf '%s' "$STATUS" | grep -q '"version":2'
 printf '%s' "$STATUS" | grep -q 'stub@example.com'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m1","provider":"claude","message":"hello"}' | grep -q 'Stub reply.'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m2","provider":"codex","message":"hello"}' | grep -q 'Codex stub.'
-curl -sk -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m3","provider":"claude","message":"FAIL-PLEASE"}' | grep -q '502'
+# A failed turn keeps its 502 and now says why, in the provider's own words (I1).
+FAILED=$(curl -sk -w '\n%{http_code}' -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m3","provider":"claude","message":"FAIL-PLEASE"}')
+printf '%s\n' "$FAILED" | tail -1 | grep -q '^502$'
+printf '%s' "$FAILED" | grep -q '"cause":"usageLimit"'
+printf '%s' "$FAILED" | grep -q '"provider":"claude"'
+printf '%s' "$FAILED" | grep -q 'session limit'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/cancel" -d '{"id":"m9"}' | grep -q '"canceled":true'
 curl -sk -o /dev/null -w '%{http_code}' -H "Origin: https://evil.example" "https://127.0.0.1:$PORT/status" | grep -q '403'
 # Before the app has ever pushed a snapshot, the context tool says so rather than inventing a workspace for

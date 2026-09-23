@@ -285,13 +285,21 @@ public final class ProviderService: @unchecked Sendable {
 
     private func selectedEffort(for request: MessageRequest) throws -> String? {
         guard let effort = request.effort else { return nil }
-        let catalog = models(request.provider)
-        guard !catalog.models.isEmpty else { throw BridgeError.message("Model choices are unavailable. Keep Automatic selected and try again.") }
+        let provider = request.provider
+        let catalog = models(provider)
+        guard !catalog.models.isEmpty else {
+            throw ProviderFailure(cause: .providerUnavailable, provider: provider, details: catalog.notice,
+                                  message: "Model choices are unavailable. Keep Automatic selected and try again.")
+        }
         let selectedID = request.model ?? catalog.defaultModelID
         guard let selectedID, let model = catalog.models.first(where: { $0.id == selectedID }) else {
-            throw BridgeError.message(request.model == nil ? "Choose a model before choosing effort." : "That model is not available for this provider.")
+            throw request.model == nil
+                ? ProviderFailure(cause: .badRequest, provider: provider, message: "Choose a model before choosing effort.")
+                : ProviderFailure(cause: .modelUnavailable, provider: provider, message: "That model is not available for this provider.")
         }
-        guard model.efforts.contains(effort) else { throw BridgeError.message("That effort is not available for the selected model.") }
+        guard model.efforts.contains(effort) else {
+            throw ProviderFailure(cause: .modelUnavailable, provider: provider, message: "That effort is not available for the selected model.")
+        }
         return effort
     }
 
@@ -420,8 +428,12 @@ public final class ProviderService: @unchecked Sendable {
     public func generate(_ request: MessageRequest) throws -> [String: Any] {
         let provider = request.provider
         let health = status(provider)
-        guard health.ready else { throw BridgeError.message(health.message) }
-        guard let binary = lookup(provider) else { throw BridgeError.message(health.message) }
+        // A missing CLI and a signed-out one need different fixes, so they are different causes. The status
+        // sentence already names the fix for a missing one ("Install Claude Code on your Mac first.").
+        guard let binary = lookup(provider) else {
+            throw ProviderFailure(cause: .providerUnavailable, provider: provider, details: health.message, message: health.message)
+        }
+        guard health.ready else { throw ProviderFailure(cause: .signedOut, provider: provider, details: health.message) }
         let effort = try selectedEffort(for: request)
         var clean: [String: Any] = ["provider": provider, "message": request.message]
         clean["id"] = request.id; clean["context"] = request.context; clean["history"] = request.history; clean["skills"] = request.skills
@@ -443,21 +455,22 @@ public final class ProviderService: @unchecked Sendable {
                      "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--no-session-persistence", "--input-format", "stream-json",
                      "--output-format", "stream-json", "--verbose", "--json-schema", BridgePrompt.schemaJSON]
             let result = try runner.run(args, input: String(data: line, encoding: .utf8)! + "\n", cwd: tmp, timeout: 240, requestID: request.id)
-            let events = Self.events(result.stdout)
+            let events = ProviderOutput.events(result.stdout)
             guard result.status == 0, let end = events.last(where: { $0["type"] as? String == "result" }), !(end["is_error"] as? Bool ?? false), end["subtype"] as? String == "success" else {
-                throw BridgeError.message("Claude Code could not finish. Check its sign-in, usage limit or connection on your Mac, then retry.")
+                throw ProviderOutput.claudeFailure(result, now: now())
             }
             guard let initEvent = events.first(where: { $0["type"] as? String == "system" && $0["subtype"] as? String == "init" && $0["model"] is String }) else {
-                throw BridgeError.message("Claude Code did not identify the responding model. Nothing was changed.")
+                throw ProviderFailure(cause: .internal, provider: provider, message: "Claude Code did not identify the responding model. Nothing was changed.")
             }
             // Python rejects anything but a missing value or the literal 'none'; a JSON null counts as missing.
             let keySource = initEvent["apiKeySource"]
-            if keySource != nil, !(keySource is NSNull), (keySource as? String) != "none" {
-                throw BridgeError.message("Claude selected API-key billing. Use your Claude account sign-in and try again.")
+            if let keySource, !(keySource is NSNull), (keySource as? String) != "none" {
+                throw ProviderFailure(cause: .signedOut, provider: provider, details: "apiKeySource: \(keySource)",
+                                      message: "Claude selected API-key billing. Use your Claude account sign-in and try again.")
             }
             if let structured = end["structured_output"] as? [String: Any] { output = structured }
             else if let text = end["result"] as? String, let parsed = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] { output = parsed }
-            else { throw BridgeError.message("The provider returned an unreadable response. Nothing was changed.") }
+            else { throw ProviderFailure(cause: .internal, provider: provider, message: Self.unreadable) }
             output["model"] = initEvent["model"]
         } else {
             let schemaFile = tmp.appendingPathComponent("response-schema.json")
@@ -473,32 +486,27 @@ public final class ProviderService: @unchecked Sendable {
             }
             args.append("-")
             let result = try runner.run(args, input: prompt, cwd: tmp, timeout: 240, requestID: request.id)
-            let events = Self.events(result.stdout)
+            let events = ProviderOutput.events(result.stdout)
             guard result.status == 0, events.contains(where: { $0["type"] as? String == "turn.completed" }) else {
-                throw BridgeError.message("Codex could not finish. Check its sign-in, usage limit or connection on your Mac, then retry.")
+                throw ProviderOutput.codexFailure(result)
             }
             let messages = events.compactMap { event -> String? in
                 guard event["type"] as? String == "item.completed", let item = event["item"] as? [String: Any], item["type"] as? String == "agent_message" else { return nil }
                 return item["text"] as? String
             }
             guard let last = messages.last, let parsed = (try? JSONSerialization.jsonObject(with: Data(last.utf8))) as? [String: Any] else {
-                throw BridgeError.message("The provider returned an unreadable response. Nothing was changed.")
+                throw ProviderFailure(cause: .internal, provider: provider, message: Self.unreadable)
             }
             output = parsed
             output["model"] = events.compactMap { $0["model"] as? String }.first ?? "Codex · configured default"
         }
         guard let reply = output["reply"] as? String, !reply.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw BridgeError.message("The provider returned an unreadable response. Nothing was changed.")
+            throw ProviderFailure(cause: .internal, provider: provider, message: Self.unreadable)
         }
         if request.planMode == true { output["proposal"] = NSNull() }
         if output["proposal"] == nil { output["proposal"] = NSNull() }
         output["auth"] = "subscription"; output["provider"] = provider
         return output
     }
-    private static func events(_ stdout: String) -> [[String: Any]] {
-        stdout.split(separator: "\n").compactMap { line in
-            guard line.hasPrefix("{") else { return nil }
-            return (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any]
-        }
-    }
+    private static let unreadable = "The provider returned an unreadable response. Nothing was changed."
 }

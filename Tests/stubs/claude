@@ -4,7 +4,14 @@ case "$1" in
   --version) echo "9.9.9 (Claude Code)"; exit 0;;
   -p)
     INPUT=$(cat)
-    if echo "$INPUT" | grep -q "FAIL-PLEASE"; then echo '{"type":"result","subtype":"error","is_error":true}'; exit 1; fi
+    if echo "$INPUT" | grep -q "FAIL-PLEASE"; then
+      cat <<'JSON'
+{"type":"system","subtype":"init","model":"claude-stub","apiKeySource":"none"}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 7:20pm (America/New_York)"}]},"error":"rate_limit"}
+{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 7:20pm (America/New_York)"}
+JSON
+      exit 1
+    fi
     echo '{"type":"system","subtype":"init","model":"claude-stub","apiKeySource":"none"}'
     echo '{"type":"result","subtype":"success","structured_output":{"reply":"Stub reply.","proposal":null}}'
     exit 0;;

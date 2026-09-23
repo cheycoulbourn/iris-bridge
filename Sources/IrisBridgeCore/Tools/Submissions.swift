@@ -53,34 +53,6 @@ public struct SubmittedSeries: Codable, Equatable {
 public enum SubmissionKind: String, Codable { case post, series, archive }
 public enum SubmissionStatus: String, Codable { case pending, approved, denied, changesRequested }
 
-/// JSON carried by a planner snapshot. The app deliberately sends creator text exactly as it is saved, while
-/// binary attachment data stays on-device and is represented by identity/name/type/size metadata in `details`.
-public enum PlannerJSON: Codable, Equatable {
-    case object([String: PlannerJSON]), array([PlannerJSON]), string(String), number(Double), bool(Bool), null
-
-    public init(from decoder: Decoder) throws {
-        let value = try decoder.singleValueContainer()
-        if value.decodeNil() { self = .null }
-        else if let object = try? value.decode([String: PlannerJSON].self) { self = .object(object) }
-        else if let array = try? value.decode([PlannerJSON].self) { self = .array(array) }
-        else if let bool = try? value.decode(Bool.self) { self = .bool(bool) }
-        else if let number = try? value.decode(Double.self) { self = .number(number) }
-        else { self = .string(try value.decode(String.self)) }
-    }
-
-    public func encode(to encoder: Encoder) throws {
-        var value = encoder.singleValueContainer()
-        switch self {
-        case .object(let object): try value.encode(object)
-        case .array(let array): try value.encode(array)
-        case .string(let string): try value.encode(string)
-        case .number(let number): try value.encode(number)
-        case .bool(let bool): try value.encode(bool)
-        case .null: try value.encodeNil()
-        }
-    }
-}
-
 public struct PlannerPost: Codable, Equatable, Identifiable {
     public var id: UUID
     public var revision: String
@@ -88,9 +60,9 @@ public struct PlannerPost: Codable, Equatable, Identifiable {
     public var platform: String
     public var format: String
     public var archived: Bool
-    public var details: [String: PlannerJSON]
+    public var details: [String: JSONValue]
     public init(id: UUID, revision: String, title: String, platform: String, format: String,
-                archived: Bool, details: [String: PlannerJSON]) {
+                archived: Bool, details: [String: JSONValue]) {
         self.id = id; self.revision = revision; self.title = title; self.platform = platform
         self.format = format; self.archived = archived; self.details = details
     }

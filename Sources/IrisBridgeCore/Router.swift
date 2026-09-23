@@ -102,7 +102,7 @@ public final class Router: @unchecked Sendable {
             return HTTPResponse(status: 200, json: ["deviceID": device.id, "token": token, "hostName": hostName])
         case .wrongCode(let left):
             log?.info("pairing attempt failed from \(context.sourceAddress), \(left) left")
-            return HTTPResponse(status: 400, json: ["error": "wrong-code", "attemptsLeft": left])
+            return HTTPResponse(status: 400, json: ["error": "wrong-code", "attemptsLeft": left, "cause": FailureCause.badRequest.rawValue])
         case .expired: return HTTPResponse(status: 400, error: "expired")
         case .noCode: return HTTPResponse(status: 400, error: "no-code")
         }
@@ -128,14 +128,12 @@ public final class Router: @unchecked Sendable {
             }
             log?.info("message \(parsed.provider) ok in \(Int(now().timeIntervalSince(started)))s")
             return HTTPResponse(status: 200, json: answer)
-        } catch BridgeError.timeout {
-            log?.error("message \(parsed.provider) timeout"); return HTTPResponse(status: 504, error: BridgeError.timeout.errorDescription!)
-        } catch BridgeError.canceled {
-            log?.info("message \(parsed.provider) canceled"); return HTTPResponse(status: 502, error: BridgeError.canceled.errorDescription!)
-        } catch let error as BridgeError {
-            log?.error("message \(parsed.provider) failed: \(error.errorDescription ?? "")"); return HTTPResponse(status: 502, error: String((error.errorDescription ?? "").prefix(300)))
         } catch {
-            log?.error("message \(parsed.provider) unreadable"); return HTTPResponse(status: 502, error: "The provider response could not be read. No post was changed.")
+            let failure = Self.failure(from: error, provider: parsed.provider)
+            var line = "message \(parsed.provider) \(failure.cause.rawValue) after \(Int(now().timeIntervalSince(started)))s"
+            if let details = failure.details { line += ": " + OneLineText.clean(details, limit: 300) }
+            if failure.cause == .cancelled { log?.info(line) } else { log?.error(line) }
+            return HTTPResponse(failure: failure, now: now())
         }
     }
 
@@ -153,6 +151,18 @@ public final class Router: @unchecked Sendable {
               let id = body["id"] as? String, id.count < 100 else { return HTTPResponse(status: 400, error: "Could not cancel") }
         generator.cancel(id)
         return HTTPResponse(status: 200, json: ["canceled": true])
+    }
+
+    /// Everything a generator can throw, as the one failure shape the wire carries (contract §1). A bare
+    /// `BridgeError.message` keeps its 0.2.4 sentence, capped at the same 300 characters.
+    static func failure(from error: Error, provider: String) -> ProviderFailure {
+        if let failure = error as? ProviderFailure { return failure }
+        switch error as? BridgeError {
+        case .timeout?: return ProviderFailure(cause: .timeout, provider: provider)
+        case .canceled?: return ProviderFailure(cause: .cancelled, provider: provider)
+        case .message(let text)?: return ProviderFailure(cause: .internal, provider: provider, message: String(text.prefix(300)))
+        case nil: return ProviderFailure(cause: .internal, provider: provider, message: "The provider response could not be read. No post was changed.")
+        }
     }
 
     private func admin(_ request: HTTPRequest) -> HTTPResponse {
@@ -244,11 +254,12 @@ public final class Router: @unchecked Sendable {
         } catch let error as InboxError {
             // 404 for a submission that is not here, 409 for one already decided. Anything else reached the store
             // and failed while writing, which is a server problem, not a missing submission.
-            return HTTPResponse(status: error == .notFound ? 404 : 409, error: error.localizedDescription)
+            // A decision on something already decided is the caller's mistake, not a busy helper.
+            return HTTPResponse(status: error == .notFound ? 404 : 409, error: error.localizedDescription, cause: .badRequest)
         } catch BridgeError.message("Not found.") {
-            return HTTPResponse(status: 404, error: "Not found.")
+            return HTTPResponse(status: 404, error: "Not found.", cause: .badRequest)
         } catch BridgeError.message("Already decided.") {
-            return HTTPResponse(status: 409, error: "Already decided.")
+            return HTTPResponse(status: 409, error: "Already decided.", cause: .badRequest)
         } catch {
             log?.error("inbox \(id) could not be saved")
             return HTTPResponse(status: 500, error: "Iris Bridge could not save that decision. Try again.")

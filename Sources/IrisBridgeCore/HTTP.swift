@@ -92,7 +92,11 @@ public struct HTTPResponse {
         self.status = status
         body = (try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys])) ?? Data("{}".utf8)
     }
-    public init(status: Int, error: String) { self.init(status: status, json: ["error": error]) }
+    /// Every error body names a cause (contract §1). `error` keeps whatever it said in 0.2.4, because older
+    /// apps match on it (`device-revoked`, `wrong-code`) or show it as it stands.
+    public init(status: Int, error: String) { self.init(status: status, error: error, cause: FailureCause.forStatus(status)) }
+    public init(status: Int, error: String, cause: FailureCause) { self.init(status: status, json: ["error": error, "cause": cause.rawValue]) }
+    public init(failure: ProviderFailure, now: Date = Date()) { self.init(status: failure.httpStatus, json: failure.body(now: now)) }
     public init(status: Int, data: Data) { self.status = status; body = data }
     private static let reasons = [200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
                                   409: "Conflict", 413: "Payload Too Large", 429: "Too Many Requests", 500: "Internal Server Error",

@@ -50,7 +50,7 @@ final class HTTPTests: XCTestCase {
         XCTAssertTrue(text.contains("Content-Type: application/json\r\n"))
         XCTAssertTrue(text.contains("Connection: close\r\n"))
         XCTAssertTrue(text.contains("Cache-Control: no-store\r\n"))
-        XCTAssertTrue(text.hasSuffix("{\"error\":\"Pair this device again.\"}"))
+        XCTAssertTrue(text.hasSuffix("{\"cause\":\"deviceRevoked\",\"error\":\"Pair this device again.\"}"))
         XCTAssertTrue(text.contains("Content-Length: \(response.body.count)\r\n"))
         let serialized = response.serialized()
         let blankLine = serialized.range(of: Data("\r\n\r\n".utf8))!

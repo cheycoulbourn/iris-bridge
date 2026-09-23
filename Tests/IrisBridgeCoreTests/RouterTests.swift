@@ -3,7 +3,7 @@ import XCTest
 
 private final class FakeGenerator: Generator {
     var reply: [String: Any] = ["reply": "Consider three scenes.", "proposal": NSNull(), "provider": "codex"]
-    var error: BridgeError?
+    var error: Error?
     var calls = 0
     var canceled: [String] = []
     func generate(_ request: MessageRequest) throws -> [String: Any] { calls += 1; if let error { throw error }; return reply }
@@ -150,10 +150,10 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(generator.calls, 0)
     }
     func testErrorsAreExplicitAndNoSampleFallback() {
-        generator.error = .message("Sign in first.")
+        generator.error = BridgeError.message("Sign in first.")
         let (status, body) = send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: token)
         XCTAssertEqual(status, 502); XCTAssertEqual(body["error"] as? String, "Sign in first.")
-        generator.error = .timeout
+        generator.error = BridgeError.timeout
         XCTAssertEqual(send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: token).0, 504)
     }
     func testRetryReturnsCachedReplyWithoutRegenerating() {
@@ -380,5 +380,66 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(status, 200)
         XCTAssertEqual(body["removed"] as? Int, 1)
         XCTAssertEqual(inbox.all(since: Date(timeIntervalSince1970: 0)).map(\.id).sorted(), [recent.id, stillWaiting.id].sorted())
+    }
+
+    // MARK: - Failure causes (contract §1)
+
+    func testProviderFailureKeepsTheSentenceAndAddsCauseProviderDetailsAndReset() {
+        generator.error = ProviderFailure(cause: .usageLimit, provider: "codex", details: "You’ve hit your usage limit.",
+                                          resetsAt: Date(timeIntervalSince1970: 1_790_426_460))
+        let (status, body) = send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: token)
+        XCTAssertEqual(status, 502)
+        XCTAssertEqual(body["cause"] as? String, "usageLimit")
+        XCTAssertEqual(body["provider"] as? String, "codex")
+        XCTAssertEqual(body["details"] as? String, "You’ve hit your usage limit.")
+        XCTAssertEqual(body["resetsAt"] as? String, "2026-09-26T12:41:00Z")
+        XCTAssertTrue((body["error"] as? String ?? "").hasPrefix("ChatGPT's usage limit is reached until "), "\(body)")
+    }
+
+    func testFailureStatusesStayWhatVersion024Sent() {
+        let cases: [(Error, Int, String)] = [
+            (ProviderFailure(cause: .signedOut, provider: "codex"), 502, "signedOut"),
+            (ProviderFailure(cause: .modelUnavailable, provider: "codex"), 502, "modelUnavailable"),
+            (ProviderFailure(cause: .timeout, provider: "codex"), 504, "timeout"),
+            (ProviderFailure(cause: .cancelled, provider: "codex"), 502, "cancelled"),
+            (BridgeError.timeout, 504, "timeout"),
+            (BridgeError.canceled, 502, "cancelled"),
+            (BridgeError.message("Sign in first."), 502, "internal"),
+        ]
+        for (error, expected, cause) in cases {
+            generator.error = error
+            let (status, body) = send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: token)
+            XCTAssertEqual(status, expected, "\(error)")
+            XCTAssertEqual(body["cause"] as? String, cause, "\(error)")
+            XCTAssertEqual(body["provider"] as? String, "codex", "\(error)")
+            XCTAssertFalse((body["error"] as? String ?? "").isEmpty, "\(error)")
+        }
+    }
+
+    func testTheRoutersOwnRefusalsCarryACauseAndKeepTheirOldErrorText() {
+        let revoked = send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: "wrong")
+        XCTAssertEqual(revoked.1["error"] as? String, "device-revoked")
+        XCTAssertEqual(revoked.1["cause"] as? String, "deviceRevoked")
+        XCTAssertEqual(send("POST", "/message", body: "{}", auth: token).1["cause"] as? String, "badRequest")
+        XCTAssertEqual(send("GET", "/nope", auth: token).1["cause"] as? String, "badRequest")
+        XCTAssertEqual(send("GET", "/status", origin: "https://example.org").1["cause"] as? String, "badRequest")
+        router.busy = true
+        let busy = send("POST", "/message", body: #"{"provider":"codex","message":"x"}"#, auth: token)
+        router.busy = false
+        XCTAssertEqual(busy.0, 409)
+        XCTAssertEqual(busy.1["cause"] as? String, "busy")
+        _ = pairing.issue()
+        let wrong = send("POST", "/pair", body: #"{"deviceName":"P","platform":"iphone","proof":"00"}"#)
+        XCTAssertEqual(wrong.1["error"] as? String, "wrong-code")
+        XCTAssertEqual(wrong.1["cause"] as? String, "badRequest")
+    }
+
+    func testAnAlreadyDecidedSubmissionIsABadRequestNotBusy() {
+        let submission = submit()
+        XCTAssertEqual(send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"approved"}"#, auth: token).0, 200)
+        let again = send("POST", "/inbox/\(submission.id)/decision", body: #"{"status":"denied"}"#, auth: token)
+        XCTAssertEqual(again.0, 409)
+        XCTAssertEqual(again.1["error"] as? String, "Already decided.")
+        XCTAssertEqual(again.1["cause"] as? String, "badRequest")
     }
 }

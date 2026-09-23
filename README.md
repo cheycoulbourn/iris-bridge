@@ -10,6 +10,19 @@ Then open Iris, choose this Mac under "Macs nearby", and enter the code shown in
 
 Commands: `iris-bridge pair`, `iris-bridge status`, `iris-bridge devices`, `iris-bridge revoke <id>`, `iris-bridge inbox`, `iris-bridge uninstall`.
 
+## When something goes wrong (0.2.5)
+
+Every error Iris Bridge sends back keeps its plain sentence and also says why, so the app can label it:
+signed out, usage limit (with the reset time when the provider gives one), provider unavailable, model
+unavailable, timeout, cancelled, busy, device revoked, bad request or internal. The provider's own message
+comes with it, so a usage limit reads as a usage limit, not as "check your connection".
+
+`iris-bridge status` shows each provider's sign-in, plan and command-line tool version, what the last chat
+turn said about usage, and the names and addresses you can type into Iris to reach this Mac.
+
+Iris Bridge no longer updates Claude Code for you in the middle of a chat. Update it yourself with
+`claude update`; the app shows the version the helper sees.
+
 ## Model and reasoning choices (0.2.3)
 
 In a compatible Iris app, open the model dropdown beside Send. It shows models and reasoning choices reported by the provider connected to this Mac. Codex and Claude maintain their own lists; changing models clears an effort the new model does not support. Automatic uses the provider default. If the Mac cannot provide its list, Automatic remains available and the app can refresh later.

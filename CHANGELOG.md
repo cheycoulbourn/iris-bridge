@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.5
+
+Run the install command again to pick this up. Older Iris apps keep working unchanged.
+
+- Errors say why. Every error reply keeps its `error` sentence and adds `cause`: `signedOut`, `usageLimit`,
+  `providerUnavailable`, `modelUnavailable`, `timeout`, `cancelled`, `busy`, `deviceRevoked`, `badRequest` or
+  `internal`. Provider failures also carry `provider`, the provider's own message in `details` (up to 2,000
+  characters) and, for a usage limit, `resetsAt`. Claude Code's `result` and assistant `error` events, Codex's
+  `turn.failed` and `error` events, and both tools' stderr are read instead of thrown away, so "Codex could not
+  finish" becomes "ChatGPT's usage limit is reached until Sep 26, 8:41 AM." HTTP status codes are unchanged.
+- `/status` with a device token adds `paired`, a `capabilities` list and per-provider `health`: installed,
+  signed in, plan, CLI version, usage state and reset time, and the last failure's cause. A token that matches
+  nothing gets `401 device-revoked` at once, so a revoked device stops showing "Connected". Without a token,
+  `/status` is exactly what 0.2.4 sent.
+- A usage limit is remembered until the provider's reset time, or for six hours when it gives none, and is
+  cleared by the next successful turn.
+- Claude Code is no longer updated inside a chat turn. The hourly `claude install latest` that could fail a
+  message is gone; health reports the CLI version instead.
+- A phone that locks or changes network mid-request is logged at INFO, not ERROR.
+- The Iris tools tell an agent which problem it is: Iris Bridge not set up, not running, not answering in
+  time, or serving a different certificate.
+- `iris-bridge status` prints provider health and the names and addresses this Mac answers on.
+- `scripts/smoke.sh` checks a release against the real Claude Code and Codex, and `scripts/release.sh` requires
+  a clean run of the code it tags.
+
 ## 0.2.4
 
 - Added read-only MCP planner cleanup tools for listing and searching saved posts, getting full post details,

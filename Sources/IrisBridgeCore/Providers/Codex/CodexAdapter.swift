@@ -25,12 +25,12 @@ public final class CodexAdapter: ProviderAdapter {
         self.setup = setup; self.launcher = launcher; self.healthCheck = health
     }
 
-    public func session(threadId: String, resume sessionId: String?, model: String?,
+    public func session(threadId: String, resume sessionId: String?, model: String?, effort: String? = nil,
                         events: @escaping (ProviderEvent) -> Void) throws -> ProviderSession {
         guard setup.binary() != nil else {
             throw ProviderFailure(cause: .providerUnavailable, provider: "codex", message: "Install Codex on your Mac first.")
         }
-        return CodexSession(threadId: threadId, sessionId: sessionId, model: model, setup: setup, launcher: launcher, events: events)
+        return CodexSession(threadId: threadId, sessionId: sessionId, model: model, effort: effort, setup: setup, launcher: launcher, events: events)
     }
 
     public func health() -> ProviderHealth { healthCheck() }
@@ -39,6 +39,7 @@ public final class CodexAdapter: ProviderAdapter {
 final class CodexSession: ProviderSession, @unchecked Sendable {
     private let threadId: String
     let model: String?
+    let effort: String?
     private let setup: CodexSetup
     private let launcher: ProcessLauncher
     private let events: (ProviderEvent) -> Void
@@ -50,8 +51,8 @@ final class CodexSession: ProviderSession, @unchecked Sendable {
     private var cancelled = false
     private var imageFolder: URL?
 
-    init(threadId: String, sessionId: String?, model: String?, setup: CodexSetup, launcher: ProcessLauncher, events: @escaping (ProviderEvent) -> Void) {
-        self.threadId = threadId; self.id = sessionId; self.model = model; self.setup = setup; self.launcher = launcher; self.events = events
+    init(threadId: String, sessionId: String?, model: String?, effort: String? = nil, setup: CodexSetup, launcher: ProcessLauncher, events: @escaping (ProviderEvent) -> Void) {
+        self.threadId = threadId; self.id = sessionId; self.model = model; self.effort = effort; self.setup = setup; self.launcher = launcher; self.events = events
     }
 
     var sessionId: String? { queue.sync { id } }
@@ -77,7 +78,7 @@ final class CodexSession: ProviderSession, @unchecked Sendable {
         try queue.sync {
             let resuming = id
             let prompt = resuming == nil ? IrisPrompt.system + "\n\n" + turn.text : turn.text
-            let command = ProviderCommand(arguments: CodexCommandLine.arguments(binary: binary, resume: resuming, model: model, helperBinary: setup.helperBinary,
+            let command = ProviderCommand(arguments: CodexCommandLine.arguments(binary: binary, resume: resuming, model: model, effort: effort, helperBinary: setup.helperBinary,
                                                                                 threadId: threadId, root: setup.root, port: setup.port, images: files),
                                           workingDirectory: setup.workingDirectory, input: Data(prompt.utf8))
             turnId = turn.turnId; lines = []; cancelled = false; imageFolder = folder

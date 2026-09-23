@@ -63,8 +63,10 @@ public final class SessionManager: TurnContextProvider, @unchecked Sendable {
             var state = self.threads[message.threadId] ?? ThreadState(provider: message.provider, lastUsed: self.now())
             state.lastUsed = self.now()
             self.threads[message.threadId] = state
-            guard state.turn == nil, !self.canReuse(state, provider: message.provider, model: message.model) else { return }
-            _ = try? self.startSession(message.threadId, provider: message.provider, model: message.model)
+            // `thread.open` carries no effort: a later `thread.send` that names one restarts this warm session
+            // if it differs (canReuse), so the cold start here never needs to guess it.
+            guard state.turn == nil, !self.canReuse(state, provider: message.provider, model: message.model, effort: nil) else { return }
+            _ = try? self.startSession(message.threadId, provider: message.provider, model: message.model, effort: nil)
         }
     }
 
@@ -117,8 +119,8 @@ public final class SessionManager: TurnContextProvider, @unchecked Sendable {
         threads[threadId] = state
         let session: ProviderSession
         do {
-            if canReuse(state, provider: message.provider, model: message.model), let current = state.session { session = current }
-            else { session = try startSession(threadId, provider: message.provider, model: message.model) }
+            if canReuse(state, provider: message.provider, model: message.model, effort: message.effort), let current = state.session { session = current }
+            else { session = try startSession(threadId, provider: message.provider, model: message.model, effort: message.effort) }
         } catch {
             return fail(threadId, message.turnId, error as? ProviderFailure ?? ProviderFailure(cause: .internal, provider: message.provider.rawValue,
                                                                                                details: error.localizedDescription))
@@ -136,14 +138,17 @@ public final class SessionManager: TurnContextProvider, @unchecked Sendable {
         }
     }
 
-    private func canReuse(_ state: ThreadState, provider: Provider, model: String?) -> Bool {
+    /// An omitted `effort` (nil) makes no claim either way and reuses whatever is running, exactly like an
+    /// omitted `model`; a given `effort` that differs from the running session's own forces a restart.
+    private func canReuse(_ state: ThreadState, provider: Provider, model: String?, effort: String?) -> Bool {
         guard let session = state.session, state.provider == provider else { return false }
         if let model, model != session.model { return false }
+        if let effort, effort != session.effort { return false }
         return provider == .codex || session.isLive
     }
 
     @discardableResult
-    private func startSession(_ threadId: String, provider: Provider, model: String?) throws -> ProviderSession {
+    private func startSession(_ threadId: String, provider: Provider, model: String?, effort: String?) throws -> ProviderSession {
         guard let adapter = adapters[provider] else {
             throw ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, message: "This Mac cannot run \(provider.displayName).")
         }
@@ -151,7 +156,7 @@ public final class SessionManager: TurnContextProvider, @unchecked Sendable {
         makeRoom(for: threadId)
         let token = UUID()
         let resume = index.sessionId(threadId: threadId, provider: provider)
-        let session = try adapter.session(threadId: threadId, resume: resume, model: model) { [weak self] event in
+        let session = try adapter.session(threadId: threadId, resume: resume, model: model, effort: effort) { [weak self] event in
             self?.queue.async { self?.handle(threadId, provider, token, event) }
         }
         if let id = session.sessionId { index.set(id, threadId: threadId, provider: provider) }

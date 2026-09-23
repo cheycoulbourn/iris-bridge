@@ -6,11 +6,14 @@ private final class FakeAdapter: ProviderAdapter {
     final class Session: ProviderSession {
         let sessionId: String?
         let model: String?
+        let effort: String?
         var isLive = true
         var sent: [TurnRequest] = []
         var cancels = 0, stops = 0
         let emit: (ProviderEvent) -> Void
-        init(id: String?, model: String?, emit: @escaping (ProviderEvent) -> Void) { sessionId = id; self.model = model; self.emit = emit }
+        init(id: String?, model: String?, effort: String?, emit: @escaping (ProviderEvent) -> Void) {
+            sessionId = id; self.model = model; self.effort = effort; self.emit = emit
+        }
         func send(_ turn: TurnRequest) throws { sent.append(turn) }
         func cancel() { cancels += 1 }
         func stop() { stops += 1; isLive = false }
@@ -22,10 +25,10 @@ private final class FakeAdapter: ProviderAdapter {
     var failure: ProviderFailure?
     init(_ provider: Provider) { self.provider = provider }
 
-    func session(threadId: String, resume sessionId: String?, model: String?, events: @escaping (ProviderEvent) -> Void) throws -> ProviderSession {
+    func session(threadId: String, resume sessionId: String?, model: String?, effort: String?, events: @escaping (ProviderEvent) -> Void) throws -> ProviderSession {
         if let failure { throw failure }
         resumes.append(sessionId)
-        let session = Session(id: provider == .claude ? (sessionId ?? "claude-\(sessions.count + 1)") : sessionId, model: model, emit: events)
+        let session = Session(id: provider == .claude ? (sessionId ?? "claude-\(sessions.count + 1)") : sessionId, model: model, effort: effort, emit: events)
         sessions.append(session)
         return session
     }
@@ -57,10 +60,10 @@ final class SessionManagerTests: XCTestCase {
     }
 
     private func send(_ thread: String? = nil, turn: String = "t1", provider: Provider = .claude, text: String = "Plan my week",
-                      model: String? = nil, mentions: [String]? = nil, command: AppMessage.Command? = nil,
+                      model: String? = nil, effort: String? = nil, mentions: [String]? = nil, command: AppMessage.Command? = nil,
                       catchUp: [AppMessage.CatchUp]? = nil) {
-        manager.send(AppMessage.ThreadSend(threadId: thread ?? a, turnId: turn, provider: provider, model: model, text: text, command: command,
-                                           mentions: mentions, attachments: nil, catchUp: catchUp))
+        manager.send(AppMessage.ThreadSend(threadId: thread ?? a, turnId: turn, provider: provider, model: model, effort: effort, text: text,
+                                           command: command, mentions: mentions, attachments: nil, catchUp: catchUp))
         _ = manager.turnContext(threadId: thread ?? a)   // waits for the send to be handled
     }
 
@@ -101,6 +104,38 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(claude.sessions.count, 2)
         XCTAssertEqual(claude.resumes, [nil, "claude-1"])
         XCTAssertEqual(claude.sessions[0].stops, 1)
+    }
+
+    /// spec-adjacent (`effort` capability): a turn answered on Automatic, then a later send asking for a
+    /// specific effort restarts the process with `--resume` once that turn is done, keeping history.
+    func testAnEffortChangeResumesTheSessionAfterTheRunningTurnEnds() throws {
+        send(effort: nil)
+        claude.sessions[0].emit(.turn(turnId: "t1", .completed(TurnUsage())))
+        send(turn: "t2", effort: "high")
+        XCTAssertEqual(claude.sessions.count, 2)
+        XCTAssertEqual(claude.resumes, [nil, "claude-1"])
+        XCTAssertEqual(claude.sessions[0].stops, 1)
+        XCTAssertEqual(claude.sessions[1].effort, "high")
+        XCTAssertEqual(claude.sessions[1].sent.map(\.text), ["Plan my week"])
+    }
+
+    func testTheSameEffortOnTheNextMessageDoesNotRestart() throws {
+        send(effort: "xhigh")
+        claude.sessions[0].emit(.turn(turnId: "t1", .completed(TurnUsage())))
+        send(turn: "t2", effort: "xhigh")
+        XCTAssertEqual(claude.sessions.count, 1)
+        XCTAssertEqual(claude.sessions[0].stops, 0)
+        XCTAssertEqual(claude.sessions[0].sent.count, 2)
+    }
+
+    /// An omitted effort on a later send makes no claim either way, exactly like an omitted model: the
+    /// session already running (started with an effort) keeps answering unchanged.
+    func testAnOmittedEffortOnTheNextMessageKeepsTheRunningSession() throws {
+        send(effort: "medium")
+        claude.sessions[0].emit(.turn(turnId: "t1", .completed(TurnUsage())))
+        send(turn: "t2", effort: nil)
+        XCTAssertEqual(claude.sessions.count, 1)
+        XCTAssertEqual(claude.sessions[0].stops, 0)
     }
 
     func testOneTurnPerThreadAndThreeAcrossTheMac() {

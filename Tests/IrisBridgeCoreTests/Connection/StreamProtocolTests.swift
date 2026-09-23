@@ -10,13 +10,18 @@ final class StreamProtocolTests: XCTestCase {
                        .hello(.init(deviceToken: "t", appVersion: "1.0 (139)", protocol: 3, cursors: [thread: 41])))
         XCTAssertEqual(try decode(#"{"type":"thread.open","threadId":"\#(thread)","provider":"claude","model":"haiku"}"#),
                        .threadOpen(.init(threadId: thread, provider: .claude, model: "haiku")))
-        guard case .threadSend(let send) = try decode(#"{"type":"thread.send","threadId":"\#(thread)","turnId":"t1","provider":"claude","text":"Plan my week","command":{"kind":"iris","name":"plan-week","connectors":["claude_ai_Google_Calendar"]},"mentions":["claude_ai_Gmail"],"attachments":[{"kind":"document","name":"brief.md","text":"Brief"}],"catchUp":[{"role":"user","text":"From the train"}]}"#) else {
+        guard case .threadSend(let send) = try decode(#"{"type":"thread.send","threadId":"\#(thread)","turnId":"t1","provider":"claude","text":"Plan my week","effort":"xhigh","command":{"kind":"iris","name":"plan-week","connectors":["claude_ai_Google_Calendar"]},"mentions":["claude_ai_Gmail"],"attachments":[{"kind":"document","name":"brief.md","text":"Brief"}],"catchUp":[{"role":"user","text":"From the train"}]}"#) else {
             return XCTFail("not a thread.send")
         }
         XCTAssertEqual(send.command?.connectors, ["claude_ai_Google_Calendar"])
         XCTAssertEqual(send.mentions, ["claude_ai_Gmail"])
         XCTAssertEqual(send.attachments?.first?.text, "Brief")
         XCTAssertEqual(send.catchUp?.first?.text, "From the train")
+        XCTAssertEqual(send.effort, "xhigh")
+        guard case .threadSend(let automatic) = try decode(#"{"type":"thread.send","threadId":"\#(thread)","turnId":"t1","provider":"claude","text":"Hi"}"#) else {
+            return XCTFail("not a thread.send")
+        }
+        XCTAssertNil(automatic.effort, "effort is optional; absent is Automatic")
         XCTAssertEqual(try decode(#"{"type":"turn.cancel","threadId":"\#(thread)","turnId":"t1"}"#), .turnCancel(.init(threadId: thread, turnId: "t1")))
         XCTAssertEqual(try decode(#"{"type":"approval.answer","approvalId":"ap_1","decision":"allow","edited":{"summary":"Lunch"}}"#),
                        .approvalAnswer(.init(approvalId: "ap_1", decision: "allow", edited: ["summary": "Lunch"])))
@@ -33,9 +38,9 @@ final class StreamProtocolTests: XCTestCase {
         XCTAssertThrowsError(try decode(#"{"type":"hello","protocol":3}"#), "a hello without a token is unreadable")
     }
 
-    private func send(text: String = "Hi", provider: Provider = .claude, model: String? = nil, command: AppMessage.Command? = nil,
+    private func send(text: String = "Hi", provider: Provider = .claude, model: String? = nil, effort: String? = nil, command: AppMessage.Command? = nil,
                       mentions: [String]? = nil, attachments: [AppMessage.Attachment]? = nil) -> AppMessage.ThreadSend {
-        AppMessage.ThreadSend(threadId: thread, turnId: "t1", provider: provider, model: model, text: text, command: command,
+        AppMessage.ThreadSend(threadId: thread, turnId: "t1", provider: provider, model: model, effort: effort, text: text, command: command,
                               mentions: mentions, attachments: attachments, catchUp: nil)
     }
 
@@ -51,6 +56,16 @@ final class StreamProtocolTests: XCTestCase {
         XCTAssertEqual(send(provider: .codex, mentions: ["claude_ai_Gmail"]).problem(), "Connectors only work with Claude.")
         XCTAssertEqual(send(attachments: [.init(kind: "image", name: nil, mime: "image/gif", data: "AAAA", text: nil)]).problem(), "Use JPEG or PNG images.")
         XCTAssertEqual(send(attachments: [.init(kind: "video", name: nil, mime: nil, data: nil, text: nil)]).problem(), "Attach images or documents only.")
+    }
+
+    /// The `effort` capability's fixed vocabulary (spec-adjacent): every value it advertises is accepted,
+    /// nil (Automatic) needs no choice, and anything else is the existing invalid-message refusal.
+    func testEffortAcceptsTheFixedVocabularyAndRefusesAnythingElse() {
+        for level in StreamIdentifiers.efforts { XCTAssertNil(send(effort: level).problem(), level) }
+        XCTAssertNil(send(effort: nil).problem())
+        for bad in ["", "High", "ultra", "low ", " low", "not valid"] {
+            XCTAssertEqual(send(effort: bad).problem(), "Choose a valid reasoning effort.", bad)
+        }
     }
 
     func testTurnEventsRenderTheWireShape() {

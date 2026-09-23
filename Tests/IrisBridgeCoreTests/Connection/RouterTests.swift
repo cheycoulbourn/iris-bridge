@@ -455,7 +455,7 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(status, 200)
         XCTAssertEqual(body["paired"] as? Bool, true)
         XCTAssertEqual(body["capabilities"] as? [String], BridgeVersion.capabilities)
-        XCTAssertEqual(BridgeVersion.capabilities, ["chat", "inbox", "modelSelection", "plannerAccess", "causes", "health", "authStatus", "v3"])
+        XCTAssertEqual(BridgeVersion.capabilities, ["chat", "inbox", "modelSelection", "plannerAccess", "causes", "health", "authStatus", "v3", "effort"])
         let health = body["health"] as? [String: Any]
         let codex = health?["codex"] as? [String: Any]
         XCTAssertEqual(codex?["usage"] as? String, "limited")

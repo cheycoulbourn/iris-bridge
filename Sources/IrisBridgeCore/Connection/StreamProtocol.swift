@@ -42,6 +42,10 @@ public enum AppMessage: Equatable {
         public var turnId: String
         public var provider: Provider
         public var model: String?
+        /// Nil is Automatic (the provider's own default); a given value must be one of the `effort` capability's
+        /// fixed vocabulary (`StreamIdentifiers.efforts`). Omitted on a later send, the session's current
+        /// effort is kept; given and different, the session restarts with `--resume` once the running turn ends.
+        public var effort: String?
         public var text: String
         public var command: Command?
         public var mentions: [String]?
@@ -141,6 +145,10 @@ public enum StreamIdentifiers {
         !text.isEmpty && text.count <= 120 && !text.hasPrefix("-")
             && text.unicodeScalars.allSatisfy { !$0.properties.isWhitespace && $0.value >= 0x20 && $0.value != 0x7F }
     }
+
+    /// The `effort` capability's fixed vocabulary, low to high. A `thread.send.effort` outside this list is
+    /// refused; Codex maps xhigh and max onto its own highest documented level (`CodexCommandLine.codexEffort`).
+    public static let efforts = ["low", "medium", "high", "xhigh", "max"]
 }
 
 extension AppMessage.ThreadSend {
@@ -149,6 +157,7 @@ extension AppMessage.ThreadSend {
     public func problem() -> String? {
         guard StreamIdentifiers.isThreadID(threadId), StreamIdentifiers.isToken(turnId) else { return "This message has no valid thread or turn id." }
         if let model, !StreamIdentifiers.isModel(model) { return "Choose a valid model identifier." }
+        if let effort, !StreamIdentifiers.efforts.contains(effort) { return "Choose a valid reasoning effort." }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty && command == nil { return "Enter a message." }
         if text.count > StreamLimits.maximumText { return "Enter a message under 24,000 characters." }

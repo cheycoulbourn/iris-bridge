@@ -26,6 +26,7 @@ final class CodexAdapterTests: XCTestCase {
         XCTAssertTrue(arguments.contains(#"mcp_servers.iris.args=["mcp","--thread","\#(thread)","--root","/tmp/iris root","--port","48731"]"#))
         XCTAssertEqual(arguments.enumerated().filter { $0.element == "--disable" }.map { arguments[$0.offset + 1] }, CodexCommandLine.disabledFeatures)
         XCTAssertTrue(arguments.contains(#"model="gpt-5-codex""#))
+        XCTAssertFalse(arguments.contains { $0.hasPrefix("model_reasoning_effort=") }, "Automatic sends no config")
         XCTAssertEqual(arguments.last, "-")
         XCTAssertFalse(arguments.contains("--ephemeral"))
         XCTAssertFalse(arguments.contains("js_repl"), "removed in Codex 0.155")
@@ -109,5 +110,23 @@ final class CodexAdapterTests: XCTestCase {
 
     func testTOMLStringsAreEscaped() {
         XCTAssertEqual(CodexCommandLine.toml(#"a "quoted" \ path"#), #""a \"quoted\" \\ path""#)
+    }
+
+    /// Codex documents low/medium/high for `model_reasoning_effort`; the app's Claude-only xhigh and max fold
+    /// into Codex's highest rather than being sent unmapped or refused (this stays unverified live, Task 13).
+    func testAGivenEffortBecomesCodexsDocumentedConfigKey() throws {
+        let launcher = ScriptedLauncher("codex-exec-tool-call")
+        let session = try adapter(launcher).session(threadId: thread, resume: nil, model: nil, effort: "medium", events: { _ in })
+        try session.send(TurnRequest(turnId: "t1", text: "Hi"))
+        XCTAssertTrue(launcher.commands[0].arguments.contains(#"model_reasoning_effort="medium""#))
+        XCTAssertEqual(session.effort, "medium")
+    }
+
+    func testXhighAndMaxMapToCodexsHighestDocumentedLevel() {
+        XCTAssertEqual(CodexCommandLine.codexEffort("low"), "low")
+        XCTAssertEqual(CodexCommandLine.codexEffort("medium"), "medium")
+        XCTAssertEqual(CodexCommandLine.codexEffort("high"), "high")
+        XCTAssertEqual(CodexCommandLine.codexEffort("xhigh"), "high")
+        XCTAssertEqual(CodexCommandLine.codexEffort("max"), "high")
     }
 }

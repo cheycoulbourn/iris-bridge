@@ -2,7 +2,7 @@ import Foundation
 
 /// The `claude -p` command line for a chat session (spec §6.4, as the phase 1 spike verified it).
 public enum ClaudeCommandLine {
-    public static func arguments(binary: String, sessionId: String, resume: Bool, model: String?, mcpConfig: String) -> [String] {
+    public static func arguments(binary: String, sessionId: String, resume: Bool, model: String?, effort: String? = nil, mcpConfig: String) -> [String] {
         var arguments = [binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
                          "--include-partial-messages",
                          // Tool search is the one built-in tool: without it every connector's schema goes with every
@@ -13,6 +13,7 @@ public enum ClaudeCommandLine {
                          "--mcp-config", mcpConfig,
                          "--append-system-prompt", IrisPrompt.system]
         if let model { arguments += ["--model", model] }
+        if let effort { arguments += ["--effort", effort] }
         arguments += resume ? ["--resume", sessionId] : ["--session-id", sessionId]
         return arguments
     }

@@ -29,6 +29,7 @@ final class ClaudeAdapterTests: XCTestCase {
         XCTAssertEqual(value("--permission-prompts"), "host")
         XCTAssertEqual(value("--permission-prompt-tool"), "mcp__iris__approval")
         XCTAssertEqual(value("--model"), "haiku")
+        XCTAssertNil(value("--effort"), "Automatic sends no flag")
         XCTAssertEqual(value("--session-id"), session.sessionId)
         XCTAssertNil(value("--resume"))
         XCTAssertEqual(value("--append-system-prompt"), IrisPrompt.system)
@@ -49,6 +50,16 @@ final class ClaudeAdapterTests: XCTestCase {
         XCTAssertFalse(arguments.contains("--session-id"))
         XCTAssertFalse(arguments.contains("--model"))
         XCTAssertEqual(session.sessionId, "9d361c48-33a2-45b4-b457-66fe34dc80bf")
+    }
+
+    /// The `effort` capability: a given effort resumes with `--resume ... --effort`, and the session reports
+    /// what it was started with so `SessionManager.canReuse` can tell a later change apart from a repeat.
+    func testAGivenEffortResumesWithItsOwnFlag() throws {
+        let launcher = ScriptedLauncher("claude-session-turns")
+        let session = try adapter(launcher).session(threadId: thread, resume: "9d361c48-33a2-45b4-b457-66fe34dc80bf", model: nil, effort: "xhigh", events: { _ in })
+        let arguments = launcher.commands[0].arguments
+        XCTAssertEqual(arguments.firstIndex(of: "--effort").map { arguments[$0 + 1] }, "xhigh")
+        XCTAssertEqual(session.effort, "xhigh")
     }
 
     func testATurnStreamsThinkingThenTextAndCompletesWithUsage() throws {

@@ -28,7 +28,7 @@ public final class ClaudeAdapter: ProviderAdapter {
         self.setup = setup; self.launcher = launcher; self.healthCheck = health; self.timing = timing
     }
 
-    public func session(threadId: String, resume sessionId: String?, model: String?,
+    public func session(threadId: String, resume sessionId: String?, model: String?, effort: String? = nil,
                         events: @escaping (ProviderEvent) -> Void) throws -> ProviderSession {
         guard let binary = setup.binary() else {
             throw ProviderFailure(cause: .providerUnavailable, provider: "claude", message: "Install Claude Code on your Mac first.")
@@ -36,9 +36,9 @@ public final class ClaudeAdapter: ProviderAdapter {
         try FileManager.default.createDirectory(at: setup.workingDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let id = sessionId ?? UUID().uuidString.lowercased()
         let mcp = ClaudeCommandLine.mcpConfig(helperBinary: setup.helperBinary, threadId: threadId, root: setup.root, port: setup.port)
-        let command = ProviderCommand(arguments: ClaudeCommandLine.arguments(binary: binary, sessionId: id, resume: sessionId != nil, model: model, mcpConfig: mcp),
+        let command = ProviderCommand(arguments: ClaudeCommandLine.arguments(binary: binary, sessionId: id, resume: sessionId != nil, model: model, effort: effort, mcpConfig: mcp),
                                       workingDirectory: setup.workingDirectory)
-        let session = ClaudeSession(sessionId: id, model: model, timing: timing, events: events)
+        let session = ClaudeSession(sessionId: id, model: model, effort: effort, timing: timing, events: events)
         try session.start(command, launcher: launcher)
         return session
     }
@@ -65,6 +65,7 @@ public final class ClaudeSession: ProviderSession, @unchecked Sendable {
 
     public let sessionId: String?
     public let model: String?
+    public let effort: String?
     private let timing: Timing
     private let events: (ProviderEvent) -> Void
     private let queue = DispatchQueue(label: "iris-bridge.claude-session")
@@ -76,8 +77,8 @@ public final class ClaudeSession: ProviderSession, @unchecked Sendable {
     private var requests = 0
     private var watchdog: DispatchSourceTimer?
 
-    init(sessionId: String, model: String?, timing: Timing, events: @escaping (ProviderEvent) -> Void) {
-        self.sessionId = sessionId; self.model = model; self.timing = timing; self.events = events
+    init(sessionId: String, model: String?, effort: String? = nil, timing: Timing, events: @escaping (ProviderEvent) -> Void) {
+        self.sessionId = sessionId; self.model = model; self.effort = effort; self.timing = timing; self.events = events
     }
 
     public var isLive: Bool { queue.sync { alive } }

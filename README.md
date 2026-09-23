@@ -27,6 +27,13 @@ on this Mac, run commands or browse the web. ChatGPT (Codex) gets the Iris tools
 If Claude Code's own settings pre-allow a connector tool (`permissions.allow` in `~/.claude/settings.json`),
 that tool never asks. Iris's Settings shows any such rule.
 
+A chat message can also carry a reasoning-effort choice (`thread.send.effort`, one of `low`, `medium`,
+`high`, `xhigh` or `max`; omitted is Automatic, the provider's own default). Claude receives it as `--effort`;
+Codex receives it as `model_reasoning_effort`, with `xhigh` and `max` folded into Codex's own highest
+documented level. Changing it while a chat is answering takes effect after that turn: the session restarts
+with `--resume` so the conversation is kept and nothing is cut off. The composer offers this choice only when
+the helper reports the `effort` capability.
+
 ## How it is built
 
 One Swift helper, `Sources/IrisBridgeCore`, in the parts of the Iris Bridge v3 design (§4):

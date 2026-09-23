@@ -8,7 +8,7 @@ public enum CodexCommandLine {
     /// Everything but the shell, the web and the owner's own setup.
     static let disabledFeatures = ["shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "code_mode", "hooks", "plugins", "memories"]
 
-    public static func arguments(binary: String, resume sessionId: String?, model: String?, helperBinary: String, threadId: String,
+    public static func arguments(binary: String, resume sessionId: String?, model: String?, effort: String? = nil, helperBinary: String, threadId: String,
                                  root: URL, port: UInt16, images: [String]) -> [String] {
         var arguments = [binary, "exec"]
         if let sessionId {
@@ -23,9 +23,21 @@ public enum CodexCommandLine {
                       "-c", "mcp_servers.iris.args=[\(["mcp", "--thread", threadId, "--root", root.path, "--port", String(port)].map(toml).joined(separator: ","))]"]
         for feature in disabledFeatures { arguments += ["--disable", feature] }
         if let model { arguments += ["-c", "model=\(toml(model))"] }
+        // Codex documents `model_reasoning_effort` as low/medium/high; the app's xhigh and max (Claude-only
+        // levels) map down to Codex's highest rather than being refused.
+        if let effort { arguments += ["-c", "model_reasoning_effort=\(toml(codexEffort(effort)))"] }
         for image in images { arguments += ["-i", image] }
         // `--ephemeral` is never passed: an ephemeral session cannot be resumed.
         return arguments + ["-"]
+    }
+
+    /// Maps the app's five-level effort vocabulary onto Codex's documented `model_reasoning_effort` values
+    /// (low/medium/high): xhigh and max, which only Claude offers, fold into Codex's highest, high.
+    static func codexEffort(_ effort: String) -> String {
+        switch effort {
+        case "xhigh", "max": return "high"
+        default: return effort
+        }
     }
 
     /// A TOML basic string.

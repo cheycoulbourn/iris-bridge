@@ -29,6 +29,10 @@ public protocol ProviderSession: AnyObject {
     /// The id the session resumes by: chosen by the helper for Claude, learned from `thread.started` for Codex.
     var sessionId: String? { get }
     var model: String? { get }
+    /// The reasoning effort this session's process was started with, nil for the provider's own default
+    /// (Automatic). Compared against a later `thread.send`'s effort to decide whether to restart (spec-adjacent:
+    /// the `effort` capability).
+    var effort: String? { get }
     /// True while a Claude process is alive between turns. Codex runs one process per turn.
     var isLive: Bool { get }
     func send(_ turn: TurnRequest) throws
@@ -41,9 +45,10 @@ public protocol ProviderSession: AnyObject {
 /// A ProviderAdapter per CLI (spec §6.4): start or resume a session, send a turn, cancel, health.
 public protocol ProviderAdapter: AnyObject {
     var provider: Provider { get }
-    /// A session for `threadId`, resuming `sessionId` when there is one. `events` gets everything the
-    /// session reports, on a background thread, in order.
-    func session(threadId: String, resume sessionId: String?, model: String?,
+    /// A session for `threadId`, resuming `sessionId` when there is one. `effort` is nil for Automatic; when
+    /// given, it is one of the `effort` capability's fixed values. `events` gets everything the session reports,
+    /// on a background thread, in order.
+    func session(threadId: String, resume sessionId: String?, model: String?, effort: String?,
                  events: @escaping (ProviderEvent) -> Void) throws -> ProviderSession
     func health() -> ProviderHealth
 }

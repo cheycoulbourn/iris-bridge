@@ -4,7 +4,7 @@ import XCTest
 final class IrisPromptTests: XCTestCase {
     private func send(_ text: String, command: AppMessage.Command? = nil, attachments: [AppMessage.Attachment]? = nil,
                       catchUp: [AppMessage.CatchUp]? = nil) -> AppMessage.ThreadSend {
-        AppMessage.ThreadSend(threadId: "8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77", turnId: "t1", provider: .claude, model: nil, text: text,
+        AppMessage.ThreadSend(threadId: "8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77", turnId: "t1", provider: .claude, model: nil, effort: nil, text: text,
                               command: command, mentions: nil, attachments: attachments, catchUp: catchUp)
     }
 

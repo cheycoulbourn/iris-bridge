@@ -10,7 +10,7 @@ Live smoke test against this Mac's Claude Code and Codex (`sh scripts/smoke.sh`)
 
     PASS  status without a token keeps the 0.2.4 shape
     PASS  status with a device token adds paired, capabilities and health
-          claude: installed=true signedIn=true plan=Max cli=2.1.274 usage=unknown
+          claude: installed=true signedIn=true plan=(omitted) cli=2.1.274 usage=unknown
           codex: installed=true signedIn=true plan= cli=0.155.0-alpha.9.2 usage=unknown
     PASS  status with an unknown token is refused as deviceRevoked
     PASS  iris-bridge status prints health and addresses

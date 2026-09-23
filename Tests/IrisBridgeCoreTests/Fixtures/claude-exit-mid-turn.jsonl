@@ -1,0 +1,7 @@
+{"dir":"in","obj":{"type":"control_request","request":{"subtype":"initialize"}}}
+{"dir":"out","obj":{"type":"control_response","response":{"subtype":"success","request_id":"iris-initialize","response":{"commands":[{"name":"brainstorm","description":"Brainstorm ideas with me.","argumentHint":""},{"name":"superpowers:writing-plans","description":"Write an implementation plan.","argumentHint":"<spec>"}],"models":[{"value":"default","displayName":"Default"}],"account":{"subscriptionType":"max"}}}}}
+{"dir":"in","obj":{"type":"control_request","request":{"subtype":"mcp_status"}}}
+{"dir":"out","obj":{"type":"control_response","response":{"subtype":"success","request_id":"iris-status-1","response":"@claude-mcp-status.json"}}}
+{"dir":"in","obj":{"type":"user"}}
+{"dir":"out","obj":{"type":"system","subtype":"init","cwd":"/Users/example/Library/Application Support/Iris Bridge/sessions/workspace","session_id":"9d361c48-33a2-45b4-b457-66fe34dc80bf","tools":["ToolSearch","mcp__iris__iris_list_posts","mcp__claude_ai_Gmail__search_threads"],"mcp_servers":[{"name":"iris","status":"connected","source":"dynamic"},{"name":"claude.ai Gmail","status":"connected","source":"claudeai"}],"model":"claude-haiku-4-5-20251001","permissionMode":"default","apiKeySource":"none","claude_code_version":"2.1.274"}}
+{"dir":"exit","status":1,"stderr":"Error: Failed to authenticate: OAuth session expired and could not be refreshed"}

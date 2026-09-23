@@ -32,4 +32,9 @@ or connector content from the owner's Mac is in any of them.
 | Fixture | Provenance |
 |---|---|
 | `claude-mcp-status.json` | Shape recorded by spike run q2-f (`mcpServers` with `name`, `status`, `scope`, `source`, `config`, `tools` with Claude Code's `annotations`). Servers are fictional apart from connector and tool names that are public. Two Google Calendar tools are made up to test the approval rules against annotations: `createEventFromTemplate` (marked readOnly, as a real connector marks a tool that creates something) and `fetch_and_clear_reminders` (marked destructive, with a name that reads like a read). |
+| `claude-session-turns` | Shapes recorded by the Iris Bridge v3 spike on Claude Code 2.1.274 (runs q3-a, q5-a and q2-h2: `initialize` and `mcp_status` control responses, `system init`, `rate_limit_event`, `stream_event` thinking and text deltas, full `assistant` messages with `tool_use`, `user` messages with `tool_result`, `result`). Text, ids and tool inputs replaced. |
+| `claude-interrupt` | Shape recorded by spike run q5-d: `interrupt` answered `{still_queued: []}`, `[Request interrupted by user]`, `result` `error_during_execution` with no `result`, then the same process answers the next message. |
+| `claude-turn-usage-limit` | The `claude-session-limit` message and `error: "rate_limit"` above, in the stream-json session shape. |
+| `claude-api-key` | Constructed: a `system init` whose `apiKeySource` is not `none`. |
+| `claude-exit-mid-turn` | Constructed: the process exits during a turn; stderr is the `claude-oauth-expired` message. |
 | `snapshot-v2.json` | Constructed: a fictional workspace in snapshot schema 2 (contract §5). |

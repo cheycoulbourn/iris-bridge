@@ -35,11 +35,16 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
         log.info("pruned \(removed) decided submissions older than 30 days")
     }
     let context = ContextStore(file: paths.context)
-    let router = Router(fingerprint: identity.fingerprint, hostName: HostName.computerName(), adminToken: adminToken, devices: devices, pairing: pairing,
-                        inbox: inbox, context: context, generator: LiveGenerator(), log: log)
-    let server = try BridgeServer(port: port, identity: identity, router: router, serviceName: HostName.computerName(), advertise: bonjour, log: log)
+    let generator = LiveGenerator()
+    let runtime = BridgeRuntime(paths: paths, port: port, fingerprint: identity.fingerprint, hostName: HostName.computerName(),
+                                adminToken: adminToken, devices: devices, pairing: pairing, inbox: inbox, context: context, log: log,
+                                helperBinary: Bundle.main.executablePath ?? CommandLine.arguments[0],
+                                generator: generator, providers: generator.providers)
+    let server = try BridgeServer(port: port, identity: identity, router: runtime.router, serviceName: HostName.computerName(),
+                                  advertise: bonjour, log: log, streams: runtime.hub)
     signal(SIGPIPE, SIG_IGN)
     try server.start()
+    runtime.start()
     print("Iris Bridge \(BridgeVersion.current) is running on port \(server.actualPort ?? port).")
     if devices.all.isEmpty {
         // Under launchd, stdout is a log file: a code printed here would sit on disk for anyone who can read

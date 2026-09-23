@@ -18,6 +18,13 @@ public struct BridgePaths: Sendable {
     public var inbox: URL { root.appendingPathComponent("inbox.json") }
     public var context: URL { root.appendingPathComponent("context.json") }
     public var logFile: URL { logs.appendingPathComponent("bridge.log") }
+    /// v3: each chat thread's event log, the latest snapshot per profile, the queue of changes waiting for Iris,
+    /// and the provider sessions (their index and the empty folder they run in).
+    public var events: URL { root.appendingPathComponent("events") }
+    public var snapshots: URL { root.appendingPathComponent("snapshots") }
+    public var actions: URL { root.appendingPathComponent("actions.json") }
+    public var sessionIndex: URL { root.appendingPathComponent("sessions/index.json") }
+    public var sessionWorkspace: URL { root.appendingPathComponent("sessions/workspace") }
 
     public func prepare() throws {
         let fm = FileManager.default

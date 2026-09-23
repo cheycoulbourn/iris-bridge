@@ -211,8 +211,6 @@ public final class ProviderService: @unchecked Sendable {
     private let now: () -> Date
     private var statusCache: [String: (Date, ProviderStatus)] = [:]
     private var catalogCache: [String: (Date, ProviderModelCatalog)] = [:]
-    private var lastClaudeUpdate: Date?
-    private var claudeUpdateInFlight = false
     private let lock = NSLock()
     public init(runner: ProcessRunner, executableLookup: @escaping (String) -> String? = ProviderService.findExecutable,
                 catalogLookup: @escaping (String, String) throws -> ProviderModelCatalog = ProviderService.discoverCatalog,
@@ -436,7 +434,6 @@ public final class ProviderService: @unchecked Sendable {
         defer { try? FileManager.default.removeItem(at: tmp) }
         var output: [String: Any]
         if provider == "claude" {
-            try updateClaudeIfDue(binary: binary)
             let content: [[String: Any]] = [["type": "text", "text": prompt]] + images.map { ["type": "image", "source": ["type": "base64", "media_type": $0.mime, "data": $0.data]] }
             let line = try JSONSerialization.data(withJSONObject: ["type": "user", "message": ["role": "user", "content": content]])
             var args = [binary, "-p", "--safe-mode"]
@@ -497,28 +494,6 @@ public final class ProviderService: @unchecked Sendable {
         if output["proposal"] == nil { output["proposal"] = NSNull() }
         output["auth"] = "subscription"; output["provider"] = provider
         return output
-    }
-    private func updateClaudeIfDue(binary: String) throws {
-        lock.lock()
-        let previous = lastClaudeUpdate
-        let due = previous.map { now().timeIntervalSince($0) >= 3600 } ?? true
-        guard due, !claudeUpdateInFlight else { lock.unlock(); return }
-        // Claim the slot before releasing the lock so a concurrent request cannot start a second install.
-        claudeUpdateInFlight = true
-        lastClaudeUpdate = now()
-        lock.unlock()
-        var succeeded = false
-        defer {
-            lock.lock()
-            claudeUpdateInFlight = false
-            if !succeeded { lastClaudeUpdate = previous } // Failed attempt: let the next request retry.
-            lock.unlock()
-        }
-        let updated = try runner.run([binary, "install", "latest"], input: nil, cwd: nil, timeout: 180, requestID: nil)
-        let version = try runner.run([binary, "--version"], input: nil, cwd: nil, timeout: 20, requestID: nil)
-        guard updated.status == 0, version.status == 0 else { throw BridgeError.message("Claude Code could not update. Open Claude Code on your Mac, update it, and try again.") }
-        guard status("claude", bypassCache: true).ready else { throw BridgeError.message("Claude Code needs you to sign in again after its update. Open Claude Code on your Mac and sign in, then retry.") }
-        succeeded = true
     }
     private static func events(_ stdout: String) -> [[String: Any]] {
         stdout.split(separator: "\n").compactMap { line in

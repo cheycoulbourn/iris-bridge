@@ -75,7 +75,7 @@ final class ProvidersTests: XCTestCase {
         var source = "none"
         let runner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("--version") { return result("2.1.272 (Claude Code)") }
             return result(lines([["type": "system", "subtype": "init", "model": "claude-fable-5-1", "apiKeySource": source],
                                  ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
         }
@@ -85,21 +85,20 @@ final class ProvidersTests: XCTestCase {
         source = "env"
         XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hello"))) { XCTAssertTrue("\($0)".contains("API-key")) }
     }
-    func testClaudeUpdateRunsAtMostOncePerHour() throws {
+    /// D4: the CLI is never updated inside a chat turn. A failed update used to fail the owner's message, and
+    /// retried on every message after it. A turn runs the sign-in check and the turn itself, nothing else.
+    func testAChatTurnNeverUpdatesTheCLI() throws {
         var now = Date(timeIntervalSince1970: 0)
         let runner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
             return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"],
                                  ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
         }
         let service = ProviderService(runner: runner, executableLookup: { _ in "/tool" }, now: { now })
         _ = try service.generate(MessageRequest(provider: "claude", message: "a"))
-        _ = try service.generate(MessageRequest(provider: "claude", message: "b"))
-        XCTAssertEqual(runner.calls.filter { $0.contains("install") }.count, 1)
         now = now.addingTimeInterval(3601)
-        _ = try service.generate(MessageRequest(provider: "claude", message: "c"))
-        XCTAssertEqual(runner.calls.filter { $0.contains("install") }.count, 2)
+        _ = try service.generate(MessageRequest(provider: "claude", message: "b"))
+        XCTAssertFalse(runner.calls.contains { $0.contains("install") || $0.contains("update") }, "\(runner.calls)")
     }
     func testCodexPlanModeSuppressesProposal() throws {
         let reply = #"{"reply":"Ready","proposal":{"title":"No write"}}"#
@@ -159,7 +158,7 @@ final class ProvidersTests: XCTestCase {
     func testClaudeArgumentVectorMatchesPython() throws {
         let runner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("--version") { return result("2.1.272 (Claude Code)") }
             return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"],
                                  ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
         }
@@ -197,7 +196,7 @@ final class ProvidersTests: XCTestCase {
     func testSelectedModelIsForwardedToClaude() throws {
         let runner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("--version") { return result("2.1.272 (Claude Code)") }
             return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"],
                                  ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
         }
@@ -222,7 +221,7 @@ final class ProvidersTests: XCTestCase {
     func testNilModelLeavesProviderDefaultsUnselected() throws {
         let runner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("--version") { return result("2.1.272 (Claude Code)") }
             if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
             if args.contains("--json-schema") { return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"], ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]])) }
             return result(lines([["type": "item.completed", "item": ["type": "agent_message", "text": #"{"reply":"Ready","proposal":null}"#]], ["type": "turn.completed"]]))
@@ -236,7 +235,7 @@ final class ProvidersTests: XCTestCase {
     func testSelectedEffortIsForwardedToEachProvider() throws {
         let runner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("--version") { return result("2.1.272 (Claude Code)") }
             if args.contains("login") { return result(stderr: "Logged in using ChatGPT") }
             if args.contains("--json-schema") { return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": "none"], ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]])) }
             return result(lines([["type": "item.completed", "item": ["type": "agent_message", "text": #"{"reply":"Ready","proposal":null}"#]], ["type": "turn.completed"]]))
@@ -380,7 +379,7 @@ final class ProvidersTests: XCTestCase {
         for source in [true, 1, "env"] as [Any] {
             let runner = FakeRunner { args, _ in
                 if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-                if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+                if args.contains("--version") { return result("2.1.272 (Claude Code)") }
                 return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": source],
                                      ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
             }
@@ -392,7 +391,7 @@ final class ProvidersTests: XCTestCase {
         // A JSON null counts as absent, exactly like Python's None.
         let nullRunner = FakeRunner { args, _ in
             if args.contains("auth") { return result(#"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#) }
-            if args.contains("install") || args.contains("--version") { return result("2.1.272") }
+            if args.contains("--version") { return result("2.1.272 (Claude Code)") }
             return result(lines([["type": "system", "subtype": "init", "model": "m", "apiKeySource": NSNull()],
                                  ["type": "result", "subtype": "success", "structured_output": ["reply": "Ready", "proposal": NSNull()]]]))
         }

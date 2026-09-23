@@ -1,19 +1,121 @@
-#!/bin/sh
-case "$1" in
-  auth) echo '{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai","email":"stub@example.com"}'; exit 0;;
-  --version) echo "9.9.9 (Claude Code)"; exit 0;;
-  -p)
-    INPUT=$(cat)
-    if echo "$INPUT" | grep -q "FAIL-PLEASE"; then
-      cat <<'JSON'
-{"type":"system","subtype":"init","model":"claude-stub","apiKeySource":"none"}
-{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 7:20pm (America/New_York)"}]},"error":"rate_limit"}
-{"type":"result","subtype":"success","is_error":true,"result":"You've hit your session limit · resets 7:20pm (America/New_York)"}
-JSON
-      exit 1
-    fi
-    echo '{"type":"system","subtype":"init","model":"claude-stub","apiKeySource":"none"}'
-    echo '{"type":"result","subtype":"success","structured_output":{"reply":"Stub reply.","proposal":null}}'
-    exit 0;;
-esac
-exit 1
+#!/usr/bin/env python3
+"""Stands in for Claude Code in Tests/integration.sh and Tests/smoke-test.sh. v2 chat: one structured reply.
+v3 chat: a stream-json session that answers `initialize`, `mcp_status` and `interrupt`, and reads each message
+for a few phrases so every step of scripts/smoke.sh has something real to check:
+  "iris_list_posts"  asks the Iris approval tool, then calls iris_list_posts through the session's own MCP server;
+  "create_event"     asks the approval tool about a Google Calendar write and reports what it answered;
+  "code word"        remembers the word after "code word" per session id, and says it when asked again;
+  "Count from 1"     writes numbers slowly until interrupted; "last number" says the last one it wrote."""
+import json, os, sys, threading, time, queue
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+args = sys.argv[1:]
+if args[:1] == ["auth"]:
+    print(json.dumps({"loggedIn": True, "subscriptionType": "max", "authMethod": "claude.ai", "email": "stub@example.com"})); sys.exit(0)
+if args[:1] == ["--version"]:
+    print("9.9.9 (Claude Code)"); sys.exit(0)
+if "--include-partial-messages" not in args:
+    text = sys.stdin.read()
+    if "FAIL-PLEASE" in text:
+        print(json.dumps({"type": "system", "subtype": "init", "model": "claude-stub", "apiKeySource": "none"}))
+        said = "You've hit your session limit · resets 7:20pm (America/New_York)"
+        print(json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": said}]}, "error": "rate_limit"}))
+        print(json.dumps({"type": "result", "subtype": "success", "is_error": True, "result": said}))
+        sys.exit(1)
+    print(json.dumps({"type": "system", "subtype": "init", "model": "claude-stub", "apiKeySource": "none"}))
+    print(json.dumps({"type": "result", "subtype": "success", "structured_output": {"reply": "Stub reply.", "proposal": None}}))
+    sys.exit(0)
+
+from stub_mcp_client import MCP
+
+
+def value(flag):
+    return args[args.index(flag) + 1] if flag in args else None
+
+session = value("--session-id") or value("--resume")
+memory_file = os.path.join(os.environ.get("TMPDIR", "/tmp"), "stub-claude-" + session)
+config = json.loads(value("--mcp-config"))["mcpServers"]["iris"]
+iris = MCP(config["command"], config["args"])
+lines = queue.Queue()
+threading.Thread(target=lambda: [lines.put(line) for line in sys.stdin] + [lines.put(None)], daemon=True).start()
+lock = threading.Lock()
+
+def emit(event):
+    with lock:
+        print(json.dumps(event), flush=True)
+
+def delta(text):
+    emit({"type": "stream_event", "event": {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}})
+
+def result(text, error=False, subtype="success"):
+    emit({"type": "result", "subtype": subtype, "is_error": error, "result": text,
+          "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}})
+
+def use(tool_id, name, arguments):
+    """What Claude Code does for one tool use: ask the permission-prompt tool, then call the tool if allowed."""
+    emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": tool_id, "name": name, "input": arguments}]}})
+    answer = json.loads(iris.call("approval", {"tool_name": name, "input": arguments, "tool_use_id": tool_id})[0])
+    if answer["behavior"] != "allow":
+        emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "is_error": True, "content": answer["message"]}]}})
+        return None
+    text, failed = iris.call(name.replace("mcp__iris__", ""), answer["updatedInput"]) if name.startswith("mcp__iris__") else ("created", False)
+    emit({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": tool_id, "is_error": failed, "content": [{"type": "text", "text": text}]}]}})
+    return text
+
+last_number = "NONE"
+while True:
+    line = lines.get()
+    if line is None:
+        break
+    message = json.loads(line)
+    if message.get("type") == "control_request":
+        subtype = message["request"]["subtype"]
+        answer = {"commands": [{"name": "stub-command", "description": "A stub command.", "argumentHint": ""}]} if subtype == "initialize" else {}
+        if subtype == "mcp_status":
+            answer = {"mcpServers": [{"name": "iris", "status": "connected", "scope": "dynamic", "tools": [{"name": "iris_list_posts", "annotations": {"readOnly": True}}]},
+                                     {"name": "claude.ai Google Calendar", "status": "connected", "scope": "claudeai",
+                                      "tools": [{"name": "list_events", "annotations": {"readOnly": True}}, {"name": "create_event", "annotations": {}}]}]}
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": message["request_id"], "response": answer}})
+        continue
+    if message.get("type") != "user":
+        continue
+    text = message["message"]["content"] if isinstance(message["message"]["content"], str) else message["message"]["content"][0]["text"]
+    emit({"type": "system", "subtype": "init", "model": "claude-stub", "apiKeySource": "none", "session_id": session})
+    if "iris_list_posts" in text:
+        found = use("toolu_stub_1", "mcp__iris__iris_list_posts", {})
+        title = json.loads(found)["posts"][0]["title"] if found and found.startswith("{") and json.loads(found).get("posts") else "none"
+        delta(title); result(title)
+    elif "create_event" in text:
+        done = use("toolu_stub_2", "mcp__claude_ai_Google_Calendar__create_event", {"summary": "Iris smoke test (deny me)"})
+        delta("CREATED" if done else "DENIED"); result("DENIED")
+    elif text.startswith("Remember the code word"):
+        with open(memory_file, "w") as handle:
+            handle.write(text.split("code word ")[1].split(".")[0])
+        delta("OK"); result("OK")
+    elif "code word" in text:
+        word = open(memory_file).read() if os.path.exists(memory_file) else "I do not know"
+        delta(word); result(word)
+    elif "Count from 1" in text:
+        interrupted = False
+        for number in range(1, 301):
+            delta("%d\n" % number)
+            last_number = str(number)
+            time.sleep(0.05)
+            try:
+                pending = lines.get_nowait()
+            except queue.Empty:
+                continue
+            request = json.loads(pending)
+            if request.get("request", {}).get("subtype") == "interrupt":
+                emit({"type": "control_response", "response": {"subtype": "success", "request_id": request["request_id"], "response": {"still_queued": []}}})
+                interrupted = True
+                break
+        if interrupted:
+            result(None, error=True, subtype="error_during_execution")
+        else:
+            result("300")
+    elif "last number" in text:
+        delta(last_number); result(last_number)
+    else:
+        delta("Stub reply."); result("Stub reply.")
+iris.close()

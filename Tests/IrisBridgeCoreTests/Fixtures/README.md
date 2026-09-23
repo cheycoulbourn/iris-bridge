@@ -37,4 +37,8 @@ or connector content from the owner's Mac is in any of them.
 | `claude-turn-usage-limit` | The `claude-session-limit` message and `error: "rate_limit"` above, in the stream-json session shape. |
 | `claude-api-key` | Constructed: a `system init` whose `apiKeySource` is not `none`. |
 | `claude-exit-mid-turn` | Constructed: the process exits during a turn; stderr is the `claude-oauth-expired` message. |
+| `codex-exec-usage-limit` | Recorded: spike run q4-a on Codex 0.155.0-alpha.9.2 (`thread.started`, `turn.started`, `error`, `turn.failed`, exit 1). |
+| `codex-exec-tool-call` | Constructed from Codex's documented `exec --json` output (`item.started`/`item.completed` with `mcp_tool_call`, `reasoning`, `agent_message`; `turn.completed` with `usage`). **Unverified** until spike task S7 records a real run; replace it with the recorded lines then. |
+| `codex-exec-resume` | Constructed like `codex-exec-tool-call`, for `codex exec resume`. **Unverified** until S7. |
+| `codex-exec-hang` | Constructed: a run that never finishes, for cancel. |
 | `snapshot-v2.json` | Constructed: a fictional workspace in snapshot schema 2 (contract §5). |

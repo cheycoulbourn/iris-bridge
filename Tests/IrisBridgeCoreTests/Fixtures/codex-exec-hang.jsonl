@@ -1,0 +1,4 @@
+{"dir":"in","obj":{"type":"stdin"}}
+{"dir":"out","obj":{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}}
+{"dir":"out","obj":{"type":"turn.started"}}
+{"dir":"in","obj":{"type":"never"}}

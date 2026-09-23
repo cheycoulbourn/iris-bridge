@@ -36,7 +36,7 @@ public final class Router: @unchecked Sendable {
         if request.header("origin") != nil { return HTTPResponse(status: 403, error: "Browser requests are not allowed.") }
         let bearer = request.header("authorization").flatMap { $0.hasPrefix("Bearer ") ? String($0.dropFirst(7)) : nil }
         switch (request.method, request.route) {
-        case ("GET", "/status"): return statusResponse(trusted: isTrusted(bearer, context: context))
+        case ("GET", "/status"): return status(bearer: bearer, context: context)
         case ("POST", "/pair"): return pair(request, context: context)
         case ("GET", "/models"): return authenticated(bearer) { _ in self.models(request) }
         case ("POST", "/message"): return authenticated(bearer) { _ in self.message(request) }
@@ -62,17 +62,23 @@ public final class Router: @unchecked Sendable {
         return body(device)
     }
 
-    /// `/status` answers anyone, because the connect screen has to read it before it has a token. Only a
-    /// caller we can name gets the full picture: a paired device, or this Mac's own subcommands over
-    /// loopback with the admin token. Everyone else is told whether a provider is ready and nothing about
-    /// whose account it is or what plan is behind it.
-    private func isTrusted(_ bearer: String?, context: RequestContext) -> Bool {
-        guard let bearer else { return false }
-        if devices.authenticate(token: bearer) != nil { return true }
-        return context.isLoopback && PairingProof.constantTimeEqual(bearer, adminToken)
+    /// Who asked for `/status`, which decides how much it says (contract §2).
+    private enum StatusCaller { case anonymous, device, admin }
+
+    /// `/status` answers anyone, because the connect screen reads it before it has a token, and to a caller
+    /// with no token it says exactly what 0.2.4 said. A paired device also learns that it is paired, what this
+    /// helper can do and how each provider is. This Mac's own subcommands (loopback plus the admin token) get
+    /// the same without `paired`. A token that matches nothing is refused, so a revoked device finds out on its
+    /// next poll instead of at its next message (I4); `error` keeps the `device-revoked` code older apps match.
+    private func status(bearer: String?, context: RequestContext) -> HTTPResponse {
+        guard let bearer else { return statusResponse(for: .anonymous) }
+        if devices.authenticate(token: bearer) != nil { return statusResponse(for: .device) }
+        if context.isLoopback, PairingProof.constantTimeEqual(bearer, adminToken) { return statusResponse(for: .admin) }
+        return HTTPResponse(status: 401, error: "device-revoked", cause: .deviceRevoked)
     }
 
-    private func statusResponse(trusted: Bool) -> HTTPResponse {
+    private func statusResponse(for caller: StatusCaller) -> HTTPResponse {
+        let trusted = caller != .anonymous
         func entry(_ provider: String) -> [String: Any] {
             let s = generator.status(provider)
             var dict: [String: Any] = ["ready": s.ready]
@@ -87,8 +93,14 @@ public final class Router: @unchecked Sendable {
             dict["auth"] = s.auth; dict["account"] = s.account
             return dict
         }
-        return HTTPResponse(status: 200, json: ["version": BridgeVersion.protocolVersion, "helperVersion": BridgeVersion.current, "hostName": hostName,
-                                                "providers": ["claude": entry("claude"), "codex": entry("codex")]])
+        var body: [String: Any] = ["version": BridgeVersion.protocolVersion, "helperVersion": BridgeVersion.current, "hostName": hostName,
+                                   "providers": ["claude": entry("claude"), "codex": entry("codex")]]
+        if trusted {
+            body["capabilities"] = BridgeVersion.capabilities
+            body["health"] = ["claude": generator.health("claude").json, "codex": generator.health("codex").json]
+        }
+        if caller == .device { body["paired"] = true }
+        return HTTPResponse(status: 200, json: body)
     }
 
     private func pair(_ request: HTTPRequest, context: RequestContext) -> HTTPResponse {

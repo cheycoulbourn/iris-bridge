@@ -90,11 +90,10 @@ final class RouterTests: XCTestCase {
         let anonymous = codexEntry(send("GET", "/status").1)
         XCTAssertNil(anonymous["account"]); XCTAssertNil(anonymous["auth"])
         XCTAssertEqual(anonymous["message"] as? String, "Signed in.")
-        // A bearer that matches nothing is treated as no bearer at all, not as a reason to refuse /status.
-        let wrongToken = codexEntry(send("GET", "/status", auth: "not-a-token").1)
-        XCTAssertNil(wrongToken["account"])
-        // The admin token is only the admin token when it arrives from this Mac.
-        XCTAssertNil(codexEntry(send("GET", "/status", auth: "admin-secret", loopback: false).1)["account"])
+        // A bearer that matches nothing, or the admin token from off this Mac, is refused rather than answered
+        // as anonymous (contract §2). `testATokenThatMatchesNothingIsRefusedAtOnce` pins the reply.
+        XCTAssertEqual(send("GET", "/status", auth: "not-a-token").0, 401)
+        XCTAssertEqual(send("GET", "/status", auth: "admin-secret", loopback: false).0, 401)
 
         let paired = send("GET", "/status", auth: token)
         XCTAssertEqual(paired.0, 200)
@@ -447,5 +446,51 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(again.0, 409)
         XCTAssertEqual(again.1["error"] as? String, "Already decided.")
         XCTAssertEqual(again.1["cause"] as? String, "badRequest")
+    }
+
+    // MARK: - Authenticated status (contract §2 and §3)
+
+    func testStatusWithoutATokenIsExactlyWhatVersion024Sent() {
+        let (status, body) = send("GET", "/status")
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(Set(body.keys), ["version", "helperVersion", "hostName", "providers"])
+    }
+
+    func testAPairedDeviceAlsoGetsPairedCapabilitiesAndHealth() {
+        let (status, body) = send("GET", "/status", auth: token)
+        XCTAssertEqual(status, 200)
+        XCTAssertEqual(body["paired"] as? Bool, true)
+        XCTAssertEqual(body["capabilities"] as? [String], BridgeVersion.capabilities)
+        XCTAssertEqual(BridgeVersion.capabilities, ["chat", "inbox", "modelSelection", "plannerAccess", "causes", "health", "authStatus"])
+        let health = body["health"] as? [String: Any]
+        let codex = health?["codex"] as? [String: Any]
+        XCTAssertEqual(codex?["usage"] as? String, "limited")
+        XCTAssertEqual(codex?["resetsAt"] as? String, "2026-09-26T12:41:00Z")
+        XCTAssertEqual(codex?["lastErrorCause"] as? String, "usageLimit")
+        XCTAssertEqual(codex?["cliVersion"] as? String, "0.155.0-alpha.9.2")
+        XCTAssertEqual(codex?["account"] as? String, "Pro")
+        let claude = health?["claude"] as? [String: Any]
+        XCTAssertEqual(claude?["installed"] as? Bool, false)
+        XCTAssertNil(claude?["resetsAt"])
+        XCTAssertNil(claude?["lastErrorCause"])
+    }
+
+    func testThisMacsAdminTokenGetsHealthButIsNotAPairedDevice() {
+        let (status, body) = send("GET", "/status", auth: "admin-secret", loopback: true)
+        XCTAssertEqual(status, 200)
+        XCTAssertNil(body["paired"])
+        XCTAssertNotNil(body["health"])
+        XCTAssertNotNil(body["capabilities"])
+    }
+
+    func testATokenThatMatchesNothingIsRefusedAtOnce() {
+        for (auth, loopback) in [("not-a-token", false), ("admin-secret", false)] {
+            let (status, body) = send("GET", "/status", auth: auth, loopback: loopback)
+            XCTAssertEqual(status, 401, auth)
+            XCTAssertEqual(body["error"] as? String, "device-revoked", auth)
+            XCTAssertEqual(body["cause"] as? String, "deviceRevoked", auth)
+        }
+        _ = try? devices.revoke(id: devices.all[0].id)
+        XCTAssertEqual(send("GET", "/status", auth: token).0, 401, "a revoked device learns it from its next status poll")
     }
 }

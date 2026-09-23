@@ -45,6 +45,13 @@ if grep -qF -- "$TOKEN" "$ROOT/logs/bridge.log"; then echo "LEAK: device token f
 STATUS=$(curl -sk -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/status")
 printf '%s' "$STATUS" | grep -q '"version":2'
 printf '%s' "$STATUS" | grep -q 'stub@example.com'
+# 0.2.5: the paired device's /status also says it is paired, what this helper can do and how each provider is,
+# and none of that reaches a caller without a token. A token that matches nothing is refused (contract §2).
+printf '%s' "$STATUS" | grep -q '"paired":true'
+printf '%s' "$STATUS" | grep -q '"authStatus"'
+printf '%s' "$STATUS" | grep -q '"cliVersion":"9.9.9"'
+if printf '%s' "$PUBLIC" | grep -qF -- '"health"'; then echo "LEAK: health in unauthenticated /status"; exit 1; fi
+curl -sk -o /dev/null -w '%{http_code}' -H "Authorization: Bearer not-a-token" "https://127.0.0.1:$PORT/status" | grep -q '401'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m1","provider":"claude","message":"hello"}' | grep -q 'Stub reply.'
 curl -sk -X POST -H "Authorization: Bearer $TOKEN" "https://127.0.0.1:$PORT/message" -d '{"id":"m2","provider":"codex","message":"hello"}' | grep -q 'Codex stub.'
 # A failed turn keeps its 502 and now says why, in the provider's own words (I1).

@@ -41,12 +41,19 @@ public final class DeviceStore: @unchecked Sendable {
         try save()
         return (device, token)
     }
+    /// How stale `lastSeenAt` may get on disk. An app polling `/status` with its token every few seconds would
+    /// otherwise rewrite devices.json on every poll.
+    static let lastSeenWriteInterval: TimeInterval = 60
+
     public func authenticate(token: String) -> PairedDevice? {
         lock.lock(); defer { lock.unlock() }
         let hash = Self.hash(token)
         guard let index = devices.firstIndex(where: { PairingProof.constantTimeEqual($0.tokenHash, hash) }) else { return nil }
-        devices[index].lastSeenAt = now()
-        try? save()
+        let stamp = now()
+        if stamp.timeIntervalSince(devices[index].lastSeenAt) >= Self.lastSeenWriteInterval {
+            devices[index].lastSeenAt = stamp
+            try? save()
+        }
         return devices[index]
     }
     public func revoke(id: String) throws -> Bool {

@@ -6,9 +6,14 @@ private final class FakeGenerator: Generator {
     var error: Error?
     var calls = 0
     var canceled: [String] = []
+    /// Replaces Claude's sign-in answer when set.
+    var claudeStatus: ProviderStatus?
+    /// The sign-in answers `health(_:signIn:)` was handed, so a test can see `/status` asked each provider once.
+    var healthSignIns: [String: ProviderStatus] = [:]
     func generate(_ request: MessageRequest) throws -> [String: Any] { calls += 1; if let error { throw error }; return reply }
     func status(_ provider: String) -> ProviderStatus {
-        provider == "codex"
+        if provider == "claude", let claudeStatus { return claudeStatus }
+        return provider == "codex"
             ? ProviderStatus(provider: provider, ready: true, message: "Signed in with ChatGPT Pro. Your plan limits apply.",
                              auth: "subscription", account: "chey@example.com", model: "codex-stub")
             : ProviderStatus(provider: provider, ready: false, message: "Install Claude Code on your Mac first.")
@@ -18,6 +23,12 @@ private final class FakeGenerator: Generator {
             ? ProviderHealth(installed: true, signedIn: true, account: "Pro", cliVersion: "0.155.0-alpha.9.2", usage: .limited,
                              resetsAt: Date(timeIntervalSince1970: 1_790_426_460), lastErrorCause: .usageLimit)
             : ProviderHealth(installed: false, signedIn: false, account: "", cliVersion: "", usage: .unknown)
+    }
+    func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth {
+        healthSignIns[provider] = signIn
+        var health = health(provider)
+        health.signInChecked = signIn.checked
+        return health
     }
     func models(_ provider: String) -> ProviderModelCatalog {
         guard provider == "codex" else {
@@ -492,5 +503,48 @@ final class RouterTests: XCTestCase {
         }
         _ = try? devices.revoke(id: devices.all[0].id)
         XCTAssertEqual(send("GET", "/status", auth: token).0, 401, "a revoked device learns it from its next status poll")
+    }
+
+    /// The `/status` provider entry exactly as Iris builds 106 to 136 decode it (`IrisProviderStatus`).
+    private struct AppProviderStatus: Codable { var ready: Bool; var message: String; var auth: String?; var account: String?; var model: String? }
+    private struct AppStatus: Decodable { var version: Int; var helperVersion: String; var hostName: String; var providers: [String: AppProviderStatus]
+        var capabilities: [String]?; var health: [String: [String: AppHealthValue]]? }
+    /// Build 130 on reads each health key with `try? decodeIfPresent`, so any JSON scalar must decode here.
+    private enum AppHealthValue: Decodable {
+        case bool(Bool), string(String)
+        init(from decoder: Decoder) throws {
+            let c = try decoder.singleValueContainer()
+            if let b = try? c.decode(Bool.self) { self = .bool(b) } else { self = .string(try c.decode(String.self)) }
+        }
+    }
+
+    /// A sign-in the Mac could not check is not a sign-out. Older apps show "not signed in" for `ready: false`,
+    /// so it is `ready: true` with its own sentence, and the fields and their types are the ones 0.2.5 sent.
+    func testAnUncheckedSignInKeepsTheShapeOlderAppsDecode() throws {
+        generator.claudeStatus = .unknown("claude")
+        let sentence = "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway."
+        for auth in [nil, token] as [String?] {
+            let (status, data) = raw("GET", "/status", auth: auth)
+            XCTAssertEqual(status, 200)
+            let decoded = try JSONDecoder().decode(AppStatus.self, from: data)
+            XCTAssertEqual(decoded.providers["claude"]?.ready, true)
+            XCTAssertEqual(decoded.providers["claude"]?.message, sentence)
+            XCTAssertEqual(decoded.providers["codex"]?.ready, true)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let claude = try XCTUnwrap((body["providers"] as? [String: Any])?["claude"] as? [String: Any])
+            XCTAssertTrue(Set(claude.keys).isSubset(of: ["ready", "message", "auth", "account", "model"]), "\(claude.keys)")
+        }
+        let (_, paired) = send("GET", "/status", auth: token)
+        let health = (paired["health"] as? [String: Any])?["claude"] as? [String: Any]
+        XCTAssertEqual(health?["signInChecked"] as? Bool, false)
+        XCTAssertEqual(generator.healthSignIns["claude"], .unknown("claude"), "health is built from the same answer, not a second check")
+    }
+
+    func testAFinishedCheckAddsNothingToTheStatusShape() {
+        let (_, body) = send("GET", "/status", auth: token)
+        let health = body["health"] as? [String: [String: Any]]
+        XCTAssertNil(health?["claude"]?["signInChecked"]); XCTAssertNil(health?["codex"]?["signInChecked"])
+        let anonymous = send("GET", "/status").1["providers"] as? [String: [String: Any]]
+        XCTAssertEqual(Set(anonymous?["codex"].map { Array($0.keys) } ?? []), ["ready", "message", "model"])
     }
 }

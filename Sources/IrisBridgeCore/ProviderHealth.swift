@@ -14,19 +14,24 @@ public struct ProviderHealth: Equatable, Sendable {
     public var usage: Usage
     public var resetsAt: Date?
     public var lastErrorCause: FailureCause?
+    /// False when the sign-in check did not finish (a busy Mac). `signedIn` is then true, because the helper still
+    /// tries a turn and older apps read `signedIn: false` as signed out.
+    public var signInChecked: Bool
 
     public init(installed: Bool, signedIn: Bool, account: String, cliVersion: String, usage: Usage,
-                resetsAt: Date? = nil, lastErrorCause: FailureCause? = nil) {
+                resetsAt: Date? = nil, lastErrorCause: FailureCause? = nil, signInChecked: Bool = true) {
         self.installed = installed; self.signedIn = signedIn; self.account = account; self.cliVersion = cliVersion
-        self.usage = usage; self.resetsAt = resetsAt; self.lastErrorCause = lastErrorCause
+        self.usage = usage; self.resetsAt = resetsAt; self.lastErrorCause = lastErrorCause; self.signInChecked = signInChecked
     }
 
-    /// The wire shape. A reset or a cause nobody reported is absent, not null.
+    /// The wire shape. A reset or a cause nobody reported is absent, not null, and `signInChecked` is sent only
+    /// when it is false, so a finished check sends exactly what 0.2.5 sent.
     public var json: [String: Any] {
         var body: [String: Any] = ["installed": installed, "signedIn": signedIn, "account": account,
                                    "cliVersion": cliVersion, "usage": usage.rawValue]
         if let resetsAt { body["resetsAt"] = ISO8601DateFormatter().string(from: resetsAt) }
         if let lastErrorCause { body["lastErrorCause"] = lastErrorCause.rawValue }
+        if !signInChecked { body["signInChecked"] = false }
         return body
     }
 

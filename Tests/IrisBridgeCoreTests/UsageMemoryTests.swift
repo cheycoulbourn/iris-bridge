@@ -66,5 +66,8 @@ final class UsageMemoryTests: XCTestCase {
         XCTAssertEqual(limited["usage"] as? String, "limited")
         XCTAssertEqual(limited["resetsAt"] as? String, "2026-09-26T12:41:00Z")
         XCTAssertEqual(limited["lastErrorCause"] as? String, "usageLimit")
+        let unchecked = ProviderHealth(installed: true, signedIn: true, account: "", cliVersion: "2.1.274", usage: .unknown, signInChecked: false).json
+        XCTAssertEqual(Set(unchecked.keys), ["installed", "signedIn", "account", "cliVersion", "usage", "signInChecked"])
+        XCTAssertEqual(unchecked["signInChecked"] as? Bool, false)
     }
 }

@@ -44,23 +44,21 @@ public final class HealthMonitor: @unchecked Sendable {
 
     /// Why a turn cannot start, when the last check already knows: not installed, signed out, or a sign-in the
     /// Mac could not check and has not confirmed before. Only a check that finished is signed out. One that could
-    /// not (a busy Mac) is tried (`signedIn` true, `signInChecked` false) when this Mac confirmed a subscription
-    /// sign-in earlier: a Mac that really is signed out says so in the turn. Otherwise nothing has ruled out an
-    /// API key, which a Codex run would bill (neither the environment nor the Codex adapter can tell), so it is
-    /// refused, but not as signed out.
+    /// not (a busy Mac) is tried when this Mac confirmed a subscription sign-in earlier: a Mac that really is
+    /// signed out says so in the turn. Otherwise nothing has ruled out an API key, which a Codex run would bill
+    /// (neither the environment nor the Codex adapter can tell), so it is refused, but not as signed out.
+    /// Decided from the sign-in answer's `ready`, never from the report's `signedIn`: the report shows a sign-in
+    /// nobody could check as signed in either way, so the app does not show a busy Mac as signed out.
     /// A refusal asks for a fresh check, so signing in on the Mac is picked up without waiting for the timer.
     public func readiness(_ provider: Provider) -> ProviderFailure? {
         lock.lock()
-        guard let known = health[provider] else { lock.unlock(); return nil }
+        guard let known = health[provider], let signIn = status[provider] else { lock.unlock(); return nil }
         let name = provider == .claude ? "Claude Code" : "Codex"
         let failure: ProviderFailure?
         if !known.installed { failure = ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, message: "Install \(name) on your Mac first.") }
-        else if !known.signedIn && known.signInChecked { failure = ProviderFailure(cause: .signedOut, provider: provider.rawValue, details: status[provider]?.message) }
-        else if !known.signedIn {
-            let couldNotCheck = ProviderStatus.unknown(provider.rawValue, tried: false).message
-            failure = ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, details: couldNotCheck, message: couldNotCheck)
-        }
-        else { failure = nil }
+        else if signIn.ready { failure = nil }
+        else if signIn.checked { failure = ProviderFailure(cause: .signedOut, provider: provider.rawValue, details: signIn.message) }
+        else { failure = ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, details: signIn.message, message: signIn.message) }
         lock.unlock()
         if failure != nil { refresh() }
         return failure

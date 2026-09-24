@@ -103,14 +103,15 @@ final class HealthMonitorTests: XCTestCase {
     }
 
     /// With no subscription sign-in confirmed, a check that cannot finish has not ruled out an API key. Refused,
-    /// and not as signed out.
+    /// and not as signed out: the report the app reads says `signedIn: true`, because the app shows false as
+    /// "not signed in" and refuses the send itself, and a busy Mac is not a signed-out one.
     func testASignInTheMacCouldNeverCheckIsRefusedButNotAsSignedOut() {
         runner.checkTimesOut = true
         settle()
         let failure = monitor.readiness(.claude)
         XCTAssertEqual(failure?.cause, .providerUnavailable)
         XCTAssertEqual(failure?.sentence(), "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment.")
-        XCTAssertEqual(monitor.report()["claude"]?["signedIn"], false)
+        XCTAssertEqual(monitor.report()["claude"]?["signedIn"], true, "the app shows signedIn: false as signed out")
         XCTAssertEqual(monitor.report()["claude"]?["signInChecked"], false)
     }
 
@@ -121,13 +122,14 @@ final class HealthMonitorTests: XCTestCase {
         runner.codex = .timesOut
         settle()
         XCTAssertEqual(monitor.readiness(.codex)?.cause, .providerUnavailable, "never checked: no turn")
-        XCTAssertEqual(monitor.report()["codex"]?["signedIn"], false)
+        XCTAssertEqual(monitor.report()["codex"]?["signedIn"], true, "shown as not signed out, and still refused")
         XCTAssertEqual(monitor.report()["codex"]?["signInChecked"], false)
 
         runner.codex = .apiKey
         monitor.refresh()
         eventually("codex checked") { $0["codex"]?["signInChecked"] == nil }
         XCTAssertEqual(monitor.readiness(.codex)?.cause, .signedOut, "an API key is not a subscription sign-in")
+        XCTAssertEqual(monitor.report()["codex"]?["signedIn"], false, "a finished check that found an API key is shown as signed out")
 
         runner.codex = .timesOut
         clock.advance(ProviderService.signedOutLifetime + 1)

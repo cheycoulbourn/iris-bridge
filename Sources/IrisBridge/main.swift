@@ -44,6 +44,9 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
                                   advertise: bonjour, log: log, streams: runtime.hub)
     signal(SIGPIPE, SIG_IGN)
     try server.start()
+    // A cold `claude auth status` can outlast the app's first poll, so both checks start now, side by side and
+    // behind the listener; the health monitor's first round, which checks one provider after the other, joins them.
+    generator.startSignInChecks()
     runtime.start()
     print("Iris Bridge \(BridgeVersion.current) is running on port \(server.actualPort ?? port).")
     if devices.all.isEmpty {

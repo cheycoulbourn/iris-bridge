@@ -9,6 +9,7 @@ private final class CheckRunner: ProcessRunner, @unchecked Sendable {
     private let lock = NSLock()
     private var script: [Answer]
     private var timeouts: [TimeInterval] = []
+    private var providers: [String] = []
     private var turns = 0
     var turn: ProcessResult
 
@@ -17,6 +18,8 @@ private final class CheckRunner: ProcessRunner, @unchecked Sendable {
     /// The timeout each sign-in check was given, in order.
     var checkTimeouts: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return timeouts }
     var checkCount: Int { checkTimeouts.count }
+    /// The provider each sign-in check asked about, in order.
+    var checkedProviders: [String] { lock.lock(); defer { lock.unlock() }; return providers }
     var turnCount: Int { lock.lock(); defer { lock.unlock() }; return turns }
 
     func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
@@ -24,6 +27,7 @@ private final class CheckRunner: ProcessRunner, @unchecked Sendable {
         if args.contains("status") {
             lock.lock()
             timeouts.append(timeout)
+            providers.append(args.contains("auth") ? "claude" : "codex")
             let next = script.count > 1 ? script.removeFirst() : script[0]
             lock.unlock()
             return try next()
@@ -61,7 +65,8 @@ private func catalog(_ provider: String, _ _: String) throws -> ProviderModelCat
 /// finished and said so is "signed out". One that timed out, could not start or printed nothing readable is
 /// unknown: it is never cached, and a turn is tried on it only when this Mac confirmed a subscription sign-in
 /// earlier (the turn then reports a real sign-out in its own words). Without that, nothing has ruled out an API
-/// key, so no turn runs, and the refusal does not call the Mac signed out.
+/// key, so no turn runs, and the refusal does not call the Mac signed out. Either way apps are not shown it as
+/// signed out.
 final class SignInCheckTests: XCTestCase {
     private var clock = Date(timeIntervalSince1970: 0)
 
@@ -275,10 +280,26 @@ final class SignInCheckTests: XCTestCase {
         XCTAssertEqual(health.json["signInChecked"] as? Bool, false)
         XCTAssertEqual(health.json["signedIn"] as? Bool, true, "a turn is tried, and older apps read `signedIn: false` as signed out")
         let unconfirmed = service(CheckRunner([timesOut])).health("claude")
-        XCTAssertEqual(unconfirmed, ProviderHealth(installed: true, signedIn: false, account: "", cliVersion: "2.1.274", usage: .unknown, signInChecked: false),
-                       "no turn is tried, and `signInChecked` says why")
+        XCTAssertEqual(unconfirmed, ProviderHealth(installed: true, signedIn: true, account: "", cliVersion: "2.1.274", usage: .unknown, signInChecked: false),
+                       "no turn is tried, but a Mac nobody could check is not shown as signed out; `signInChecked` says why")
         let checked = service(CheckRunner([signedIn])).health("claude")
         XCTAssertNil(checked.json["signInChecked"], "a finished check adds nothing to the 0.2.5 shape")
+        let signedOutHealth = service(CheckRunner([signedOut])).health("claude")
+        XCTAssertFalse(signedOutHealth.signedIn, "a check that finished and said so is still signed out")
+        XCTAssertNil(signedOutHealth.json["signInChecked"])
+    }
+
+    /// Apps show `signedIn` and `/status`'s `ready` as they stand: false is the "not signed in" card and the sign-in
+    /// command. Only a finished sign-out, or a missing CLI, is shown that way; whether a turn runs is `ready`'s job.
+    func testOnlyAFinishedSignOutIsShownAsSignedOut() {
+        XCTAssertTrue(ProviderStatus.unknown("claude", tried: false).shownSignedIn)
+        XCTAssertTrue(ProviderStatus.unknown("codex", tried: true).shownSignedIn)
+        XCTAssertFalse(service(CheckRunner([signedOut])).status("claude").shownSignedIn)
+        XCTAssertFalse(service(CheckRunner([claudeAPIKey])).status("claude").shownSignedIn)
+        XCTAssertFalse(service(CheckRunner([codexAPIKey])).status("codex").shownSignedIn)
+        XCTAssertTrue(service(CheckRunner([signedIn])).status("claude").shownSignedIn)
+        let missing = ProviderService(runner: CheckRunner([signedIn]), executableLookup: { _ in nil }).status("claude")
+        XCTAssertFalse(missing.shownSignedIn, "a missing CLI is not shown as signed in")
     }
 
     func testHealthFromAnAnswerInHandRunsNoSecondCheck() {
@@ -297,7 +318,9 @@ final class SignInCheckTests: XCTestCase {
         let early = service.status("claude", wait: 0.05)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1)
         XCTAssertFalse(early.checked)
-        XCTAssertFalse(early.ready, "nothing has confirmed a subscription sign-in yet")
+        XCTAssertFalse(early.ready, "nothing has confirmed a subscription sign-in yet, so no turn is tried on it")
+        XCTAssertTrue(early.shownSignedIn, "a check that is merely slow is not shown as signed out")
+        XCTAssertTrue(service.health("claude", signIn: early).signedIn)
         _ = service.status("claude", wait: 0.05)
         XCTAssertEqual(runner.checkCount, 1, "a second reader joins the check already running")
         gate.signal()
@@ -317,5 +340,33 @@ final class SignInCheckTests: XCTestCase {
         XCTAssertFalse(during.ready)
         gate.signal()
         XCTAssertFalse(service.status("claude").ready)
+    }
+
+    // MARK: - When the helper starts
+
+    /// `iris-bridge serve` starts both checks as it launches, without waiting for them, so the app's first poll and
+    /// the first message find an answer that already finished (and a subscription sign-in confirmed) instead of
+    /// starting a cold check of their own.
+    func testStartingTheSignInChecksRunsBothWithoutWaitingAndTheFirstReadFindsTheirAnswers() {
+        let gate = DispatchSemaphore(value: 0)
+        let bothSignedIn: CheckRunner.Answer = {
+            gate.wait()
+            return ProcessResult(status: 0, stdout: #"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"#, stderr: "Logged in using ChatGPT")
+        }
+        let runner = CheckRunner([bothSignedIn])
+        let service = service(runner)
+        let started = Date()
+        service.startSignInChecks()
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1, "the helper does not wait for a CLI before it answers")
+        let running = expectation(description: "both checks running")
+        DispatchQueue.global().async { while runner.checkCount < 2 { Thread.sleep(forTimeInterval: 0.01) }; running.fulfill() }
+        wait(for: [running], timeout: 5)
+        XCTAssertEqual(Set(runner.checkedProviders), ["claude", "codex"], "both providers are checked side by side")
+        gate.signal(); gate.signal()
+        let claude = service.status("claude"), codex = service.status("codex")
+        XCTAssertTrue(claude.checked && claude.ready); XCTAssertTrue(codex.checked && codex.ready)
+        XCTAssertEqual(runner.checkCount, 2, "the first reads joined the checks started at launch")
+        XCTAssertTrue(service.status("claude", wait: 0).ready, "a poll that cannot wait finds the finished answer")
+        XCTAssertEqual(runner.checkCount, 2)
     }
 }

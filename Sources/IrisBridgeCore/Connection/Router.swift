@@ -90,7 +90,9 @@ public final class Router: @unchecked Sendable {
         let signIns = ["claude": generator.status("claude"), "codex": generator.status("codex")]
         func entry(_ provider: String) -> [String: Any] {
             let s = signIns[provider]!
-            var dict: [String: Any] = ["ready": s.ready]
+            // `ready` is what the app shows: false is "not signed in" with the sign-in command in every Iris app, so
+            // a sign-in the Mac could not check is true here even when `/message` will not try a turn on it.
+            var dict: [String: Any] = ["ready": s.shownSignedIn]
             dict["model"] = s.model
             guard trusted else {
                 // The not-ready and couldn't-check copy names no account and no plan, so it is safe to repeat

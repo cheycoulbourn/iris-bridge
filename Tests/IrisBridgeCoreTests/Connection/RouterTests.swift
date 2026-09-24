@@ -512,22 +512,24 @@ final class RouterTests: XCTestCase {
         }
     }
 
-    /// A sign-in the Mac could not check is not a sign-out. When a turn is still tried (the Mac confirmed a
-    /// subscription sign-in earlier) it is `ready: true` with its own sentence, since older apps show "not signed
-    /// in" for `ready: false`; when it is not, `ready: false` with the couldn't-check sentence, never the
-    /// signed-out one. Either way the fields and their types are the ones 0.2.5 sent.
+    /// A sign-in the Mac could not check is not a sign-out, and older apps show "CLAUDE IS NOT SIGNED IN" with the
+    /// sign-in command for `ready: false`. So it is `ready: true` with its own sentence whether or not a turn is
+    /// tried on it: "… Trying anyway." when the Mac confirmed a subscription sign-in earlier, "… Try again in a
+    /// moment." when it has not, and then `/message` refuses the turn as `providerUnavailable`, which those apps
+    /// show as "Claude couldn't answer on your Mac" with Retry. Either way the fields and their types are the ones
+    /// 0.2.5 sent.
     func testAnUncheckedSignInKeepsTheShapeOlderAppsDecode() throws {
-        let cases: [(ProviderStatus, Bool, String)] = [
-            (.unknown("claude", tried: true), true, "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway."),
-            (.unknown("claude", tried: false), false, "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment."),
+        let cases: [(ProviderStatus, String)] = [
+            (.unknown("claude", tried: true), "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway."),
+            (.unknown("claude", tried: false), "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment."),
         ]
-        for (unknown, ready, sentence) in cases {
+        for (unknown, sentence) in cases {
             generator.claudeStatus = unknown
             for auth in [nil, token] as [String?] {
                 let (status, data) = raw("GET", "/status", auth: auth)
                 XCTAssertEqual(status, 200)
                 let decoded = try JSONDecoder().decode(AppStatus.self, from: data)
-                XCTAssertEqual(decoded.providers["claude"]?.ready, ready)
+                XCTAssertEqual(decoded.providers["claude"]?.ready, true, "older apps show ready: false as not signed in")
                 XCTAssertEqual(decoded.providers["claude"]?.message, sentence)
                 XCTAssertEqual(decoded.providers["codex"]?.ready, true)
                 let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
@@ -547,5 +549,69 @@ final class RouterTests: XCTestCase {
         XCTAssertNil(health?["claude"]?["signInChecked"]); XCTAssertNil(health?["codex"]?["signInChecked"])
         let anonymous = send("GET", "/status").1["providers"] as? [String: [String: Any]]
         XCTAssertEqual(Set(anonymous?["codex"].map { Array($0.keys) } ?? []), ["ready", "message", "model"])
+    }
+
+    /// The owner's case, end to end through the real sign-in service: a helper that has just started on a Mac too
+    /// busy to answer `claude auth status`. Neither the poll while the first check is still running nor the ones
+    /// after it gave up may show Claude as signed out, and a message is refused without a turn and without the
+    /// sign-in step: nothing has ruled out an API key yet.
+    func testABusyMacIsNeverShownAsSignedOutAndItsMessageIsNotTriedOrCalledSignedOut() throws {
+        let runner = BusyMacRunner()
+        let service = ProviderService(runner: runner, executableLookup: { $0 == "claude" ? "/usr/local/bin/claude" : nil })
+        service.signInRetryPause = 0
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: ServiceGenerator(service), log: nil)
+        let couldNotCheck = "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment."
+        func assertNotShownSignedOut(_ when: String) throws {
+            let (status, data) = raw("GET", "/status", auth: token)
+            XCTAssertEqual(status, 200, when)
+            let decoded = try JSONDecoder().decode(AppStatus.self, from: data)
+            XCTAssertEqual(decoded.providers["claude"]?.ready, true, when)
+            XCTAssertEqual(decoded.providers["claude"]?.message, couldNotCheck, when)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+            let claude = (body["health"] as? [String: Any])?["claude"] as? [String: Any]
+            XCTAssertEqual(claude?["signedIn"] as? Bool, true, "the Settings row says \"Signed out\" for false; \(when)")
+            XCTAssertEqual(claude?["signInChecked"] as? Bool, false, when)
+            XCTAssertEqual(decoded.providers["codex"]?.ready, false, "a missing CLI is still not ready; \(when)")
+            XCTAssertEqual(decoded.providers["codex"]?.message, "Install Codex on your Mac first.", when)
+        }
+        try assertNotShownSignedOut("while the first check is still running")
+        XCTAssertEqual(runner.checks, 1)
+        runner.release()
+        let (status, body) = send("POST", "/message", body: #"{"provider":"claude","message":"Hello"}"#, auth: token)
+        XCTAssertEqual(status, 502)
+        XCTAssertEqual(body["cause"] as? String, "providerUnavailable", "never signedOut for a Mac nobody could check")
+        XCTAssertEqual(body["error"] as? String, couldNotCheck)
+        XCTAssertEqual(runner.turns, 0, "no turn runs before a subscription sign-in is confirmed")
+        try assertNotShownSignedOut("after the checks gave up")
+    }
+}
+
+/// `ProviderService` behind the router the way `LiveGenerator` puts it there, polls waiting briefly.
+private final class ServiceGenerator: Generator {
+    let service: ProviderService
+    init(_ service: ProviderService) { self.service = service }
+    func generate(_ request: MessageRequest) throws -> [String: Any] { try service.generate(request) }
+    func status(_ provider: String) -> ProviderStatus { service.status(provider, wait: 0.05) }
+    func health(_ provider: String) -> ProviderHealth { service.health(provider) }
+    func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth { service.health(provider, signIn: signIn) }
+    func models(_ provider: String) -> ProviderModelCatalog { service.models(provider) }
+    func cancel(_ id: String) {}
+}
+
+/// A Mac too busy to answer the sign-in check: each check hangs until `release()`, then times out, as every later
+/// one does at once. Anything else is a turn, counted.
+private final class BusyMacRunner: ProcessRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var released = false, checkCount = 0, turnCount = 0
+    var checks: Int { lock.lock(); defer { lock.unlock() }; return checkCount }
+    var turns: Int { lock.lock(); defer { lock.unlock() }; return turnCount }
+    func release() { lock.lock(); released = true; lock.unlock() }
+    func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
+        if args.contains("--version") { return ProcessResult(status: 0, stdout: "2.1.274 (Claude Code)", stderr: "") }
+        guard args.contains("status") else { lock.lock(); turnCount += 1; lock.unlock(); return ProcessResult(status: 0, stdout: "", stderr: "") }
+        lock.lock(); checkCount += 1; lock.unlock()
+        while !(lock.withLock { released }) { Thread.sleep(forTimeInterval: 0.01) }
+        throw BridgeError.timeout
     }
 }

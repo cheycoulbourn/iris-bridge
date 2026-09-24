@@ -11,9 +11,15 @@ private final class CheckRunner: ProcessRunner, @unchecked Sendable {
     private var timeouts: [TimeInterval] = []
     private var providers: [String] = []
     private var turns = 0
+    private var versionScript: [Answer] = [{ ProcessResult(status: 0, stdout: "2.1.274 (Claude Code)", stderr: "") }]
+    private var versions = 0
     var turn: ProcessResult
 
     init(_ script: [Answer], turn: ProcessResult = CheckRunner.claudeReply) { self.script = script; self.turn = turn }
+
+    /// What `--version` answers, one entry per read and the last entry again once the script runs out.
+    func answerVersions(_ script: [Answer]) { lock.lock(); versionScript = script; lock.unlock() }
+    var versionReads: Int { lock.lock(); defer { lock.unlock() }; return versions }
 
     /// The timeout each sign-in check was given, in order.
     var checkTimeouts: [TimeInterval] { lock.lock(); defer { lock.unlock() }; return timeouts }
@@ -23,7 +29,13 @@ private final class CheckRunner: ProcessRunner, @unchecked Sendable {
     var turnCount: Int { lock.lock(); defer { lock.unlock() }; return turns }
 
     func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
-        if args.contains("--version") { return ProcessResult(status: 0, stdout: "2.1.274 (Claude Code)", stderr: "") }
+        if args.contains("--version") {
+            lock.lock()
+            versions += 1
+            let next = versionScript.count > 1 ? versionScript.removeFirst() : versionScript[0]
+            lock.unlock()
+            return try next()
+        }
         if args.contains("status") {
             lock.lock()
             timeouts.append(timeout)
@@ -368,5 +380,168 @@ final class SignInCheckTests: XCTestCase {
         XCTAssertEqual(runner.checkCount, 2, "the first reads joined the checks started at launch")
         XCTAssertTrue(service.status("claude", wait: 0).ready, "a poll that cannot wait finds the finished answer")
         XCTAssertEqual(runner.checkCount, 2)
+    }
+
+    /// Waits, off the main thread, until `condition` holds.
+    private func eventually(_ what: String, timeout: TimeInterval = 5, _ condition: @escaping () -> Bool) {
+        let done = expectation(description: what)
+        DispatchQueue.global().async { while !condition() { Thread.sleep(forTimeInterval: 0.01) }; done.fulfill() }
+        wait(for: [done], timeout: timeout)
+    }
+
+    // MARK: - A check that never finishes
+
+    /// A check can be stuck: a CLI the Mac never schedules, or one whose output something else keeps open. Nothing
+    /// waits on it past its deadline (`signInWaitLimit` from its start), and it keeps running: no second check
+    /// starts beside it, and its answer is kept when it does finish.
+    func testAMessageWaitsForAStuckCheckNoLongerThanTheLimit() {
+        let gate = DispatchSemaphore(value: 0)
+        let runner = CheckRunner([{ gate.wait(); return try signedIn() }])
+        let service = service(runner)
+        service.signInWait = 0.5
+        let started = Date()
+        XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hello"))) { error in
+            XCTAssertEqual((error as? ProviderFailure)?.cause, .providerUnavailable, "nothing confirmed a subscription sign-in, and a busy Mac is not signed out")
+            XCTAssertEqual((error as? ProviderFailure)?.sentence(), "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment.")
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+        XCTAssertEqual(runner.turnCount, 0)
+        let again = Date()
+        let status = service.status("claude")
+        XCTAssertLessThan(Date().timeIntervalSince(again), 0.4, "past its deadline a stuck check is not waited on again")
+        XCTAssertFalse(status.checked)
+        XCTAssertEqual(runner.checkCount, 1, "the stuck check keeps running and no second one starts beside it")
+        gate.signal()
+        eventually("the check finished") { service.status("claude", wait: 0).checked }
+        XCTAssertTrue(service.status("claude").ready, "its answer is kept when it does finish")
+        XCTAssertEqual(runner.checkCount, 1)
+    }
+
+    /// A real `claude auth status` stand-in that answers and exits at once, but leaves a detached process holding its
+    /// output. The check finishes with the answer, as soon as the CLI exits and not when that process does.
+    func testASignInCheckWhoseCLILeavesSomethingHoldingItsOutputStillFinishes() throws {
+        let leftBehind = LeftBehind()
+        defer { leftBehind.stop() }
+        let claude = try StubCLI.write("""
+            case "$1" in
+              auth) echo '{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}'; \(leftBehind.command); exit 0;;
+            esac
+            exit 1
+            """)
+        let service = ProviderService(runner: ForegroundProcessRunner(), executableLookup: { $0 == "claude" ? claude : nil })
+        let started = Date()
+        let status = service.status("claude")
+        XCTAssertLessThan(Date().timeIntervalSince(started), ForegroundProcessRunner.drainGrace + 3)
+        XCTAssertTrue(status.checked); XCTAssertTrue(status.ready)
+        XCTAssertEqual(status.plan, "Max")
+        XCTAssertTrue(leftBehind.isRunning, "the detached process was still holding the output")
+    }
+
+    func testAStuckCheckIsTriedWhenTheMacConfirmedASubscriptionEarlier() throws {
+        let gate = DispatchSemaphore(value: 0)
+        let runner = CheckRunner([signedIn, { gate.wait(); return try timesOut() }])
+        let service = confirmedEarlier(runner)
+        service.signInWait = 0.5
+        let started = Date()
+        let output = try service.generate(MessageRequest(provider: "claude", message: "Hello"))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3)
+        XCTAssertEqual(output["reply"] as? String, "Ready")
+        XCTAssertEqual(runner.turnCount, 1)
+        gate.signal()
+    }
+
+    // MARK: - /status waits once
+
+    func testStatusesShareOneWaitForBothProviders() {
+        let gate = DispatchSemaphore(value: 0)
+        let runner = CheckRunner([{ gate.wait(); return try signedIn() }])
+        let service = service(runner)
+        let started = Date()
+        let answers = service.statuses(["claude", "codex"], wait: 0.5)
+        let took = Date().timeIntervalSince(started)
+        XCTAssertLessThan(took, 0.9, "one wait for both providers, not one each")
+        XCTAssertEqual(Set(answers.keys), ["claude", "codex"])
+        XCTAssertEqual(answers["claude"]?.checked, false); XCTAssertEqual(answers["codex"]?.checked, false)
+        XCTAssertEqual(answers["claude"]?.shownSignedIn, true)
+        XCTAssertEqual(Set(runner.checkedProviders), ["claude", "codex"], "both checks started before either was waited for")
+        gate.signal(); gate.signal()
+    }
+
+    // MARK: - The CLI version
+
+    func testTheCLIVersionsAreReadAsTheHelperStarts() {
+        let runner = CheckRunner([signedIn])
+        let service = ProviderService(runner: runner, executableLookup: { "/iris-test/\($0)" }, catalogLookup: catalog, now: { [unowned self] in clock })
+        service.startSignInChecks()
+        eventually("both versions read") { runner.versionReads == 2 }
+        let health = service.health("claude", signIn: service.status("claude"), versionWait: 0)
+        XCTAssertEqual(health.cliVersion, "2.1.274", "the first poll finds the version without waiting for it")
+        XCTAssertEqual(runner.versionReads, 2)
+    }
+
+    /// 0.2.6 as reviewed kept a version read that timed out as "" for good, so a busy Mac at launch showed no CLI
+    /// version until the CLI itself changed.
+    func testAVersionReadThatDoesNotFinishIsAskedAgain() {
+        let runner = CheckRunner([signedIn])
+        runner.answerVersions([timesOut, { ProcessResult(status: 0, stdout: "2.1.274 (Claude Code)", stderr: "") }])
+        let service = service(runner)
+        XCTAssertEqual(service.health("claude").cliVersion, "", "nothing to show yet")
+        XCTAssertEqual(service.health("claude").cliVersion, "2.1.274", "the next read asks again")
+        XCTAssertEqual(service.health("claude").cliVersion, "2.1.274")
+        XCTAssertEqual(runner.versionReads, 2, "a version that was read is kept")
+    }
+
+    func testAStatusPollDoesNotWaitForAVersionPastItsOneWait() {
+        let gate = DispatchSemaphore(value: 0)
+        let runner = CheckRunner([signedIn])
+        runner.answerVersions([{ gate.wait(); return ProcessResult(status: 0, stdout: "2.1.274 (Claude Code)", stderr: "") }])
+        let service = service(runner)
+        let started = Date()
+        let signIn = service.statuses(["claude"], wait: 0.3)["claude"]!
+        let health = service.health("claude", signIn: signIn, versionWait: 0)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.8)
+        XCTAssertEqual(health.cliVersion, "", "no version yet, and no second wait for it")
+        XCTAssertTrue(health.signedIn)
+        gate.signal()
+        eventually("the version arrives") { service.health("claude", signIn: signIn, versionWait: 0).cliVersion == "2.1.274" }
+        XCTAssertEqual(runner.versionReads, 1)
+    }
+
+    // MARK: - /models while a check runs
+
+    func testAModelListDoesNotWaitOutAStuckCheck() {
+        let gate = DispatchSemaphore(value: 0)
+        let runner = CheckRunner([{ gate.wait(); return try signedIn() }])
+        var lookups = 0
+        let service = service(runner, catalogLookup: { lookups += 1; return try catalog($0, $1) })
+        service.modelsWait = 0.3
+        let started = Date()
+        let list = service.models("claude")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1, "well inside the app's 30-second /models timeout")
+        XCTAssertTrue(list.models.isEmpty)
+        XCTAssertEqual(list.source, "unavailable")
+        XCTAssertEqual(list.notice, "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment.")
+        XCTAssertEqual(lookups, 0, "no CLI is started for a list while the sign-in is unknown")
+        gate.signal()
+    }
+
+    func testAModelListWhileACheckRunsIsTheLastListOnceASubscriptionWasConfirmed() {
+        let gate = DispatchSemaphore(value: 0)
+        let runner = CheckRunner([signedIn, { gate.wait(); return try signedIn() }])
+        var lookups = 0
+        let service = service(runner, catalogLookup: { lookups += 1; return try catalog($0, $1) })
+        let live = service.models("claude")
+        XCTAssertEqual(live.models.map(\.id), ["claude-custom-v1"])
+        clock = clock.addingTimeInterval(ProviderService.signedInLifetime + 1)
+        service.modelsWait = 0.3
+        let started = Date()
+        let earlier = service.models("claude")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        XCTAssertEqual(earlier.models, live.models, "the list this Mac gave last")
+        XCTAssertEqual(earlier.defaultModelID, "claude-custom-v1")
+        XCTAssertEqual(earlier.source, "cached-test")
+        XCTAssertEqual(earlier.notice, "Couldn't check Claude's sign-in just now — the Mac may be busy. These are the model choices from earlier.")
+        XCTAssertEqual(lookups, 1)
+        gate.signal()
     }
 }

@@ -16,6 +16,8 @@ public final class HealthMonitor: @unchecked Sendable {
     private var commands: JSONValue = []
     private var connectors = ConnectorTable()
     private var lastReport: JSONValue?
+    /// A health round is queued and has not started yet. Every refresh asked for until it starts is that round.
+    private var roundPending = false
     private var timer: DispatchSourceTimer?
     public weak var outbox: StreamOutbox?
 
@@ -33,8 +35,20 @@ public final class HealthMonitor: @unchecked Sendable {
         lock.lock(); self.timer = timer; lock.unlock()
     }
 
-    /// Checks again soon, off the caller's thread; sends `health.changed` when anything changed.
-    public func refresh() { queue.async { self.check() } }
+    /// Checks again soon, off the caller's thread; sends `health.changed` when anything changed. Requests coalesce:
+    /// while a round is queued and has not started, asking again adds nothing, so a burst of refused sends is one
+    /// more round rather than one each, run back to back behind a slow check. A request made while a round runs
+    /// queues one more, so a change it was asked for is not missed.
+    public func refresh() {
+        lock.lock()
+        guard !roundPending else { lock.unlock(); return }
+        roundPending = true
+        lock.unlock()
+        queue.async {
+            self.lock.lock(); self.roundPending = false; self.lock.unlock()
+            self.check()
+        }
+    }
 
     /// The last health object, without asking any CLI.
     public func report() -> JSONValue {
@@ -87,7 +101,8 @@ public final class HealthMonitor: @unchecked Sendable {
     private func check() {
         var freshStatus: [Provider: ProviderStatus] = [:], freshHealth: [Provider: ProviderHealth] = [:]
         for provider in Provider.allCases {
-            // Health is built from the same answer, so a check that could not finish is not run twice.
+            // Health is built from the same answer, so a check that could not finish is not run twice. A check that
+            // never finishes holds the round no longer than `ProviderService.signInWaitLimit` from its start.
             let signIn = providers.status(provider.rawValue)
             freshStatus[provider] = signIn
             freshHealth[provider] = providers.health(provider.rawValue, signIn: signIn)

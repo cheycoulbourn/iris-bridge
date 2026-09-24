@@ -11,10 +11,14 @@ private final class ScriptedRunner: ProcessRunner, @unchecked Sendable {
     var checkTimesOut: Bool { get { lock.lock(); defer { lock.unlock() }; return _checkTimesOut } set { lock.lock(); _checkTimesOut = newValue; lock.unlock() } }
     var codex: CodexSignIn { get { lock.lock(); defer { lock.unlock() }; return _codex } set { lock.lock(); _codex = newValue; lock.unlock() } }
     var claudeChecks: Int { lock.lock(); defer { lock.unlock() }; return _claudeChecks }
+    private var _gate: DispatchSemaphore?
+    /// The next Claude sign-in check waits for this before it answers; the ones after it do not.
+    func holdNextClaudeCheck(until gate: DispatchSemaphore) { lock.lock(); _gate = gate; lock.unlock() }
     func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
         if args.contains("--version") { return ProcessResult(status: 0, stdout: args[0].hasSuffix("claude") ? "2.1.274 (Claude Code)" : "codex-cli 0.155.0-alpha.9.2", stderr: "") }
         if args.contains("auth") {
-            lock.lock(); _claudeChecks += 1; lock.unlock()
+            lock.lock(); _claudeChecks += 1; let gate = _gate; _gate = nil; lock.unlock()
+            gate?.wait()
             if checkTimesOut { throw BridgeError.timeout }
             return ProcessResult(status: 0, stdout: signedIn ? #"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"# : #"{"loggedIn":false}"#, stderr: "")
         }
@@ -31,6 +35,7 @@ final class HealthMonitorTests: XCTestCase {
     private var runner: ScriptedRunner!
     private var outbox: FakeOutbox!
     private var monitor: HealthMonitor!
+    private var providers: ProviderService!
     private let clock = TestClock()
 
     override func setUp() {
@@ -38,7 +43,7 @@ final class HealthMonitorTests: XCTestCase {
         runner = ScriptedRunner()
         outbox = FakeOutbox()
         let clock = self.clock
-        let providers = ProviderService(runner: runner, executableLookup: { "/usr/local/bin/\($0)" }, now: { clock.now })
+        providers = ProviderService(runner: runner, executableLookup: { "/usr/local/bin/\($0)" }, now: { clock.now })
         providers.signInRetryPause = 0
         monitor = HealthMonitor(providers: providers, settingsFile: settings)
         monitor.outbox = outbox
@@ -178,6 +183,43 @@ final class HealthMonitorTests: XCTestCase {
         monitor.observe(.claude, .turn(turnId: "t2", .failed(ProviderFailure(cause: .busy, provider: "claude"))))
         settle()
         XCTAssertNil(monitor.report()["claude"]?["lastErrorCause"], "a refused message says nothing about Claude")
+    }
+
+    /// A sign-in check that never finishes holds a health round no longer than the limit: the round ends, the report
+    /// says the sign-in could not be checked, and a send is refused without waiting on the check.
+    func testAStuckSignInCheckHoldsAHealthRoundNoLongerThanTheLimit() {
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        providers.signInWait = 0.5
+        runner.holdNextClaudeCheck(until: gate)
+        monitor.refresh()
+        eventually("the round ended with the check still stuck") { $0["checked"] == true }
+        XCTAssertEqual(monitor.report()["claude"]?["signInChecked"], false)
+        XCTAssertEqual(monitor.report()["claude"]?["signedIn"], true, "a Mac nobody could check is not shown as signed out")
+        XCTAssertEqual(monitor.readiness(.claude)?.cause, .providerUnavailable)
+        XCTAssertEqual(runner.claudeChecks, 1, "the stuck check keeps running and no second one starts beside it")
+    }
+
+    /// Every refused send asks for a fresh round. While one is queued and not started, asking again is that round:
+    /// a burst of refusals behind a slow check is one more round, not one each run back to back.
+    func testRepeatedRefusalsQueueOneHealthRoundNotOneEach() {
+        runner.checkTimesOut = true
+        settle()
+        XCTAssertEqual(runner.claudeChecks, 2, "a check that could not finish, and its one quick retry")
+        let gate = DispatchSemaphore(value: 0)
+        runner.holdNextClaudeCheck(until: gate)
+        monitor.refresh()
+        let holding = expectation(description: "a round is waiting on the check")
+        DispatchQueue.global().async { while self.runner.claudeChecks < 3 { Thread.sleep(forTimeInterval: 0.01) }; holding.fulfill() }
+        wait(for: [holding], timeout: 5)
+        for _ in 0..<20 { XCTAssertEqual(monitor.readiness(.claude)?.cause, .providerUnavailable) }
+        gate.signal()
+        // The held round ends (its retry makes 4), then the one round the refusals asked for (5 and 6).
+        let settled = expectation(description: "the rounds ran")
+        DispatchQueue.global().async { while self.runner.claudeChecks < 6 { Thread.sleep(forTimeInterval: 0.01) }; settled.fulfill() }
+        wait(for: [settled], timeout: 5)
+        Thread.sleep(forTimeInterval: 0.5)
+        XCTAssertEqual(runner.claudeChecks, 6, "twenty refusals, one more round")
     }
 
     func testPreAllowedMCPToolsAreReported() throws {

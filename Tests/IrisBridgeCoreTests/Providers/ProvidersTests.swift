@@ -357,6 +357,36 @@ final class ProvidersTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 6)
     }
 
+    /// A process that answers and exits at once but leaves something running with its output open: here a
+    /// grandchild in a session of its own, which no signal to the process group reaches. 0.2.6 as reviewed read
+    /// to the end of the pipe, so the run (and a sign-in check with it) lasted as long as the grandchild did.
+    func testARunEndsSoonAfterItsProcessExitsWhenSomethingItLeftBehindHoldsTheOutput() throws {
+        let leftBehind = LeftBehind()
+        defer { leftBehind.stop() }
+        let runner = ForegroundProcessRunner()
+        let started = Date()
+        let result = try runner.run(["/bin/sh", "-c", "echo answered; \(leftBehind.command); exit 0"], input: nil, cwd: nil,
+                                    timeout: 20, requestID: nil)
+        XCTAssertLessThan(Date().timeIntervalSince(started), ForegroundProcessRunner.drainGrace + 3)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(result.stdout, "answered\n", "everything the process wrote before it exited")
+        XCTAssertTrue(leftBehind.isRunning, "the grandchild really was still holding the pipe")
+    }
+
+    /// The same, for a process that traps SIGTERM and has to be killed: the run ends at its timeout and the kill.
+    func testATimedOutRunEndsWhenItsChildTrapsTermAndLeftSomethingHoldingTheOutput() {
+        let leftBehind = LeftBehind()
+        defer { leftBehind.stop() }
+        let runner = ForegroundProcessRunner()
+        let started = Date()
+        XCTAssertThrowsError(try runner.run(["/bin/sh", "-c", "trap '' TERM; \(leftBehind.command); sleep 30"], input: nil, cwd: nil,
+                                            timeout: 1, requestID: nil)) {
+            XCTAssertEqual($0 as? BridgeError, .timeout)
+        }
+        XCTAssertLessThan(Date().timeIntervalSince(started), 6, "1 s timeout, 3 s before the kill, and nothing waits for the pipe after it")
+        XCTAssertTrue(leftBehind.isRunning)
+    }
+
     func testCancelIsThePublicEntryPoint() {
         let runner = ForegroundProcessRunner()
         runner.cancel(requestID: "cancel-2")

@@ -14,8 +14,9 @@ public struct ProviderHealth: Equatable, Sendable {
     public var usage: Usage
     public var resetsAt: Date?
     public var lastErrorCause: FailureCause?
-    /// False when the sign-in check did not finish (a busy Mac). `signedIn` is then true, because the helper still
-    /// tries a turn and older apps read `signedIn: false` as signed out.
+    /// False when the sign-in check did not finish (a busy Mac). `signedIn` then says whether the helper still
+    /// tries a turn: true when this Mac confirmed a subscription sign-in earlier, false when nothing has ruled out
+    /// an API key yet.
     public var signInChecked: Bool
 
     public init(installed: Bool, signedIn: Bool, account: String, cliVersion: String, usage: Usage,

@@ -10,15 +10,21 @@ Run the install command again to pick this up. Older Iris apps keep working unch
   gets 20 seconds and one quick retry. Only a check that finishes and says so (`loggedIn: false`, an API-key
   sign-in, Codex's "Not logged in") counts as signed out; a timeout, a CLI that will not start or an answer the
   helper cannot read is "couldn't check".
-- A message is tried when the sign-in could not be checked. If the Mac really is signed out, the turn itself says
-  so and the reply carries `cause: signedOut` with the provider's own words, as before.
+- A message is tried when the sign-in could not be checked, provided a check since the helper started found a
+  subscription sign-in. If the Mac really is signed out, the turn itself says so and the reply carries
+  `cause: signedOut` with the provider's own words, as before. Without such a check nothing has ruled out an API
+  key (Codex bills a key saved with `codex login --with-api-key` whatever the environment says), so no turn runs:
+  the reply is "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment." with
+  `cause: providerUnavailable`, not `signedOut`. A check that could not finish never replaces the last one that did.
 - A check that could not finish is never kept. A sign-in is kept for a minute, as before; a sign-out for ten
   seconds, so signing in on the Mac shows up at once.
 - `/status` answers within the app's poll timeout. A sign-in check that is still running is answered with the
-  last real answer, or with `ready: true` and "Couldn't check Claude's sign-in just now — the Mac may be busy.
-  Trying anyway." when there is none, and finishes in the background. For a paired device, health adds
-  `signInChecked: false` in that case; nothing else in the reply changes, and a finished check sends exactly the
-  0.2.5 shape. `iris-bridge status` prints "sign-in unknown" for it.
+  last real answer, or with `ready: false` and "Couldn't check Claude's sign-in just now — the Mac may be busy.
+  Try again in a moment." when there is none, and finishes in the background. A check that could not finish is
+  `ready: true` with "… Trying anyway." when a turn is still tried, and `ready: false` with "… Try again in a
+  moment." when it is not. For a paired device, health adds `signInChecked: false` in both cases; nothing else in
+  the reply changes, and a finished check sends exactly the 0.2.5 shape. `iris-bridge status` prints "sign-in
+  unknown" for it.
 
 ## 0.2.5
 

@@ -518,26 +518,33 @@ final class RouterTests: XCTestCase {
         }
     }
 
-    /// A sign-in the Mac could not check is not a sign-out. Older apps show "not signed in" for `ready: false`,
-    /// so it is `ready: true` with its own sentence, and the fields and their types are the ones 0.2.5 sent.
+    /// A sign-in the Mac could not check is not a sign-out. When a turn is still tried (the Mac confirmed a
+    /// subscription sign-in earlier) it is `ready: true` with its own sentence, since older apps show "not signed
+    /// in" for `ready: false`; when it is not, `ready: false` with the couldn't-check sentence, never the
+    /// signed-out one. Either way the fields and their types are the ones 0.2.5 sent.
     func testAnUncheckedSignInKeepsTheShapeOlderAppsDecode() throws {
-        generator.claudeStatus = .unknown("claude")
-        let sentence = "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway."
-        for auth in [nil, token] as [String?] {
-            let (status, data) = raw("GET", "/status", auth: auth)
-            XCTAssertEqual(status, 200)
-            let decoded = try JSONDecoder().decode(AppStatus.self, from: data)
-            XCTAssertEqual(decoded.providers["claude"]?.ready, true)
-            XCTAssertEqual(decoded.providers["claude"]?.message, sentence)
-            XCTAssertEqual(decoded.providers["codex"]?.ready, true)
-            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
-            let claude = try XCTUnwrap((body["providers"] as? [String: Any])?["claude"] as? [String: Any])
-            XCTAssertTrue(Set(claude.keys).isSubset(of: ["ready", "message", "auth", "account", "model"]), "\(claude.keys)")
+        let cases: [(ProviderStatus, Bool, String)] = [
+            (.unknown("claude", tried: true), true, "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway."),
+            (.unknown("claude", tried: false), false, "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment."),
+        ]
+        for (unknown, ready, sentence) in cases {
+            generator.claudeStatus = unknown
+            for auth in [nil, token] as [String?] {
+                let (status, data) = raw("GET", "/status", auth: auth)
+                XCTAssertEqual(status, 200)
+                let decoded = try JSONDecoder().decode(AppStatus.self, from: data)
+                XCTAssertEqual(decoded.providers["claude"]?.ready, ready)
+                XCTAssertEqual(decoded.providers["claude"]?.message, sentence)
+                XCTAssertEqual(decoded.providers["codex"]?.ready, true)
+                let body = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+                let claude = try XCTUnwrap((body["providers"] as? [String: Any])?["claude"] as? [String: Any])
+                XCTAssertTrue(Set(claude.keys).isSubset(of: ["ready", "message", "auth", "account", "model"]), "\(claude.keys)")
+            }
+            let (_, paired) = send("GET", "/status", auth: token)
+            let health = (paired["health"] as? [String: Any])?["claude"] as? [String: Any]
+            XCTAssertEqual(health?["signInChecked"] as? Bool, false)
+            XCTAssertEqual(generator.healthSignIns["claude"], unknown, "health is built from the same answer, not a second check")
         }
-        let (_, paired) = send("GET", "/status", auth: token)
-        let health = (paired["health"] as? [String: Any])?["claude"] as? [String: Any]
-        XCTAssertEqual(health?["signInChecked"] as? Bool, false)
-        XCTAssertEqual(generator.healthSignIns["claude"], .unknown("claude"), "health is built from the same answer, not a second check")
     }
 
     func testAFinishedCheckAddsNothingToTheStatusShape() {

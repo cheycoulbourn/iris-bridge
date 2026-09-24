@@ -10,7 +10,9 @@ public enum StatusReport {
         var lines = ["Iris Bridge \(status["helperVersion"] as? String ?? "?") on \(status["hostName"] as? String ?? "?") (port \(port))"]
         for name in ["claude", "codex"] {
             let ready = providers[name]?["ready"] as? Bool == true
-            var line = "  \(name): \(ready ? "signed in" : "not signed in") — \(providers[name]?["message"] as? String ?? "")"
+            let unchecked = health[name]?["signInChecked"] as? Bool == false
+            let signIn = unchecked ? "sign-in unknown" : ready ? "signed in" : "not signed in"
+            var line = "  \(name): \(signIn) — \(providers[name]?["message"] as? String ?? "")"
             if let entry = health[name] {
                 let version = entry["cliVersion"] as? String ?? ""
                 if !version.isEmpty { line += " — CLI \(version)" }

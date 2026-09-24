@@ -42,14 +42,21 @@ public final class HealthMonitor: @unchecked Sendable {
         return makeReport()
     }
 
-    /// Why a turn cannot start, when the last check already knows: not installed, or signed out.
+    /// Why a turn cannot start, when the last check already knows: not installed, or signed out. Only a check
+    /// that finished counts. One that could not (a busy Mac) is reported with `signedIn` true and
+    /// `signInChecked` false, and the turn is tried: a Mac that really is signed out says so in the turn.
+    /// A refusal asks for a fresh check, so signing in on the Mac is picked up without waiting for the timer.
     public func readiness(_ provider: Provider) -> ProviderFailure? {
-        lock.lock(); defer { lock.unlock() }
-        guard let known = health[provider] else { return nil }
+        lock.lock()
+        guard let known = health[provider] else { lock.unlock(); return nil }
         let name = provider == .claude ? "Claude Code" : "Codex"
-        if !known.installed { return ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, message: "Install \(name) on your Mac first.") }
-        if !known.signedIn { return ProviderFailure(cause: .signedOut, provider: provider.rawValue, details: status[provider]?.message) }
-        return nil
+        let failure: ProviderFailure?
+        if !known.installed { failure = ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, message: "Install \(name) on your Mac first.") }
+        else if !known.signedIn && known.signInChecked { failure = ProviderFailure(cause: .signedOut, provider: provider.rawValue, details: status[provider]?.message) }
+        else { failure = nil }
+        lock.unlock()
+        if failure != nil { refresh() }
+        return failure
     }
 
     /// What sessions learn (`SessionManager.observer`).
@@ -75,8 +82,10 @@ public final class HealthMonitor: @unchecked Sendable {
     private func check() {
         var freshStatus: [Provider: ProviderStatus] = [:], freshHealth: [Provider: ProviderHealth] = [:]
         for provider in Provider.allCases {
-            freshStatus[provider] = providers.status(provider.rawValue)
-            freshHealth[provider] = providers.health(provider.rawValue)
+            // Health is built from the same answer, so a check that could not finish is not run twice.
+            let signIn = providers.status(provider.rawValue)
+            freshStatus[provider] = signIn
+            freshHealth[provider] = providers.health(provider.rawValue, signIn: signIn)
         }
         lock.lock(); status = freshStatus; health = freshHealth; lock.unlock()
         publishIfChanged()

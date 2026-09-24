@@ -34,6 +34,20 @@ final class StatusReportTests: XCTestCase {
                                "  codex: not signed in — ", "  paired devices: 0"])
     }
 
+    func testASignInTheMacCouldNotCheckIsNotPrintedAsSignedOut() {
+        let sentence = "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway."
+        let lines = StatusReport.lines(status: ["helperVersion": "0.3.0", "hostName": "Studio Mac",
+                                                "providers": ["claude": ["ready": true, "message": sentence],
+                                                              "codex": ["ready": true, "message": "Signed in with ChatGPT. Your plan limits apply."]],
+                                                "health": ["claude": ["installed": true, "signedIn": true, "account": "", "cliVersion": "2.1.274",
+                                                                      "usage": "unknown", "signInChecked": false],
+                                                           "codex": ["installed": true, "signedIn": true, "account": "", "cliVersion": "0.155.0",
+                                                                     "usage": "unknown"]]],
+                                       port: 48731, pairedDevices: 1, addresses: [])
+        XCTAssertEqual(lines[1], "  claude: sign-in unknown — \(sentence) — CLI 2.1.274")
+        XCTAssertEqual(lines[2], "  codex: signed in — Signed in with ChatGPT. Your plan limits apply. — CLI 0.155.0")
+    }
+
     func testLANAddressesLeaveOutLoopbackAndLinkLocal() {
         for address in HostName.lanAddresses() {
             XCTAssertFalse(address.hasPrefix("127.") || address.hasPrefix("169.254."), address)

@@ -7,8 +7,14 @@ public protocol Generator {
     func generate(_ request: MessageRequest) throws -> [String: Any]
     func status(_ provider: String) -> ProviderStatus
     func health(_ provider: String) -> ProviderHealth
+    /// Health from the sign-in answer `/status` already has, so one poll checks each CLI once.
+    func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth
     func models(_ provider: String) -> ProviderModelCatalog
     func cancel(_ id: String)
+}
+
+extension Generator {
+    public func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth { health(provider) }
 }
 
 public final class Router: @unchecked Sendable {
@@ -81,14 +87,15 @@ public final class Router: @unchecked Sendable {
 
     private func statusResponse(for caller: StatusCaller) -> HTTPResponse {
         let trusted = caller != .anonymous
+        let signIns = ["claude": generator.status("claude"), "codex": generator.status("codex")]
         func entry(_ provider: String) -> [String: Any] {
-            let s = generator.status(provider)
+            let s = signIns[provider]!
             var dict: [String: Any] = ["ready": s.ready]
             dict["model"] = s.model
             guard trusted else {
-                // The not-ready copy names no account and no plan, so it is safe to repeat verbatim; the
-                // ready copy carries the subscription tier, so it is replaced.
-                dict["message"] = s.ready ? "Signed in." : s.message
+                // The not-ready and couldn't-check copy names no account and no plan, so it is safe to repeat
+                // verbatim; the signed-in copy carries the subscription tier, so it is replaced.
+                dict["message"] = s.ready && s.checked ? "Signed in." : s.message
                 return dict
             }
             dict["message"] = s.message
@@ -99,7 +106,8 @@ public final class Router: @unchecked Sendable {
                                    "providers": ["claude": entry("claude"), "codex": entry("codex")]]
         if trusted {
             body["capabilities"] = BridgeVersion.capabilities
-            body["health"] = ["claude": generator.health("claude").json, "codex": generator.health("codex").json]
+            body["health"] = ["claude": generator.health("claude", signIn: signIns["claude"]!).json,
+                              "codex": generator.health("codex", signIn: signIns["codex"]!).json]
         }
         if caller == .device { body["paired"] = true }
         return HTTPResponse(status: 200, json: body)

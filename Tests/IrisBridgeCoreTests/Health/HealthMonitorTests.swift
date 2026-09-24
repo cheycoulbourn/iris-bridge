@@ -1,11 +1,18 @@
 import XCTest
 @testable import IrisBridgeCore
 
-private final class ScriptedRunner: ProcessRunner {
-    var signedIn = true
+private final class ScriptedRunner: ProcessRunner, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _signedIn = true, _checkTimesOut = false, _claudeChecks = 0
+    var signedIn: Bool { get { lock.lock(); defer { lock.unlock() }; return _signedIn } set { lock.lock(); _signedIn = newValue; lock.unlock() } }
+    /// Claude's sign-in check times out, the way it does on a Mac too busy to start a CLI in time.
+    var checkTimesOut: Bool { get { lock.lock(); defer { lock.unlock() }; return _checkTimesOut } set { lock.lock(); _checkTimesOut = newValue; lock.unlock() } }
+    var claudeChecks: Int { lock.lock(); defer { lock.unlock() }; return _claudeChecks }
     func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
         if args.contains("--version") { return ProcessResult(status: 0, stdout: args[0].hasSuffix("claude") ? "2.1.274 (Claude Code)" : "codex-cli 0.155.0-alpha.9.2", stderr: "") }
         if args.contains("auth") {
+            lock.lock(); _claudeChecks += 1; lock.unlock()
+            if checkTimesOut { throw BridgeError.timeout }
             return ProcessResult(status: 0, stdout: signedIn ? #"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"# : #"{"loggedIn":false}"#, stderr: "")
         }
         return ProcessResult(status: 0, stdout: "", stderr: "Logged in using ChatGPT")
@@ -17,14 +24,24 @@ final class HealthMonitorTests: XCTestCase {
     private var runner: ScriptedRunner!
     private var outbox: FakeOutbox!
     private var monitor: HealthMonitor!
+    private let clock = TestClock()
 
     override func setUp() {
         settings = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".json")
         runner = ScriptedRunner()
         outbox = FakeOutbox()
-        let providers = ProviderService(runner: runner, executableLookup: { "/usr/local/bin/\($0)" })
+        let clock = self.clock
+        let providers = ProviderService(runner: runner, executableLookup: { "/usr/local/bin/\($0)" }, now: { clock.now })
+        providers.signInRetryPause = 0
         monitor = HealthMonitor(providers: providers, settingsFile: settings)
         monitor.outbox = outbox
+    }
+
+    /// Waits, off the main thread, until the report says what `condition` wants.
+    private func eventually(_ what: String, _ condition: @escaping (JSONValue) -> Bool) {
+        let done = expectation(description: what)
+        DispatchQueue.global().async { while !condition(self.monitor.report()) { Thread.sleep(forTimeInterval: 0.01) }; done.fulfill() }
+        wait(for: [done], timeout: 5)
     }
 
     private func settle() {
@@ -64,6 +81,30 @@ final class HealthMonitorTests: XCTestCase {
         XCTAssertNil(monitor.readiness(.codex))
     }
 
+    func testASignInTheMacCouldNotCheckIsTriedNotRefused() {
+        runner.checkTimesOut = true
+        settle()
+        XCTAssertNil(monitor.readiness(.claude), "a busy Mac is not a signed-out one")
+        let claude = monitor.report()["claude"]
+        XCTAssertEqual(claude?["signedIn"], true, "older apps read signedIn: false as signed out")
+        XCTAssertEqual(claude?["signInChecked"], false)
+        XCTAssertEqual(claude?["account"], "")
+        XCTAssertEqual(runner.claudeChecks, 2, "one check and its one quick retry; health does not check again")
+        XCTAssertNil(monitor.report()["codex"]?["signInChecked"], "a finished check adds nothing to the report")
+    }
+
+    func testSigningInAfterARefusalIsPickedUpWithoutWaitingForTheTimer() {
+        runner.signedIn = false
+        settle()
+        // The owner signs in on the Mac after the last check. The monitor's timer is not running in this test,
+        // so the check that notices is the one the refusal asks for.
+        runner.signedIn = true
+        clock.advance(11)
+        XCTAssertEqual(monitor.readiness(.claude)?.cause, .signedOut)
+        eventually("signed in") { $0["claude"]?["signedIn"] == true }
+        XCTAssertNil(monitor.readiness(.claude))
+    }
+
     func testUsageFollowsWhatTurnsReport() {
         settle()
         let reset = Date(timeIntervalSince1970: 1_790_205_600)
@@ -87,4 +128,12 @@ final class HealthMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.preAllowedTools(), ["mcp__claude_ai_Gmail__send_message", "mcp__iris__iris_list_posts"])
         XCTAssertEqual(monitor.report()["claude"]?["preAllowedTools"]?.arrayValue?.count, 2)
     }
+}
+
+/// The clock `ProviderService` keeps its sign-in answers by. Read from the monitor's queue, so it is locked.
+private final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var current = Date(timeIntervalSince1970: 1_790_000_000)
+    var now: Date { lock.lock(); defer { lock.unlock() }; return current }
+    func advance(_ seconds: TimeInterval) { lock.lock(); current += seconds; lock.unlock() }
 }

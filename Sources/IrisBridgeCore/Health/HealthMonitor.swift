@@ -42,9 +42,12 @@ public final class HealthMonitor: @unchecked Sendable {
         return makeReport()
     }
 
-    /// Why a turn cannot start, when the last check already knows: not installed, or signed out. Only a check
-    /// that finished counts. One that could not (a busy Mac) is reported with `signedIn` true and
-    /// `signInChecked` false, and the turn is tried: a Mac that really is signed out says so in the turn.
+    /// Why a turn cannot start, when the last check already knows: not installed, signed out, or a sign-in the
+    /// Mac could not check and has not confirmed before. Only a check that finished is signed out. One that could
+    /// not (a busy Mac) is tried (`signedIn` true, `signInChecked` false) when this Mac confirmed a subscription
+    /// sign-in earlier: a Mac that really is signed out says so in the turn. Otherwise nothing has ruled out an
+    /// API key, which a Codex run would bill (neither the environment nor the Codex adapter can tell), so it is
+    /// refused, but not as signed out.
     /// A refusal asks for a fresh check, so signing in on the Mac is picked up without waiting for the timer.
     public func readiness(_ provider: Provider) -> ProviderFailure? {
         lock.lock()
@@ -53,6 +56,10 @@ public final class HealthMonitor: @unchecked Sendable {
         let failure: ProviderFailure?
         if !known.installed { failure = ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, message: "Install \(name) on your Mac first.") }
         else if !known.signedIn && known.signInChecked { failure = ProviderFailure(cause: .signedOut, provider: provider.rawValue, details: status[provider]?.message) }
+        else if !known.signedIn {
+            let couldNotCheck = ProviderStatus.unknown(provider.rawValue, tried: false).message
+            failure = ProviderFailure(cause: .providerUnavailable, provider: provider.rawValue, details: couldNotCheck, message: couldNotCheck)
+        }
         else { failure = nil }
         lock.unlock()
         if failure != nil { refresh() }

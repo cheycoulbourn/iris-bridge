@@ -47,6 +47,10 @@ private let signedOut: CheckRunner.Answer = { ProcessResult(status: 1, stdout: #
 private let timesOut: CheckRunner.Answer = { throw BridgeError.timeout }
 private let cannotStart: CheckRunner.Answer = { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EAGAIN)) }
 private let unreadable: CheckRunner.Answer = { ProcessResult(status: 0, stdout: "Loading…", stderr: "") }
+private let chatGPT: CheckRunner.Answer = { ProcessResult(status: 0, stdout: "", stderr: "Logged in using ChatGPT") }
+/// `codex login --with-api-key` saves the key in Codex's own auth file, so a clean environment still bills it.
+private let codexAPIKey: CheckRunner.Answer = { ProcessResult(status: 0, stdout: "", stderr: "Logged in using an API key - sk-proj-***") }
+private let claudeAPIKey: CheckRunner.Answer = { ProcessResult(status: 0, stdout: #"{"loggedIn":true,"authMethod":"api_key","apiProvider":"firstParty"}"#, stderr: "") }
 
 private func catalog(_ provider: String, _ _: String) throws -> ProviderModelCatalog {
     ProviderModelCatalog(provider: provider, models: [ProviderModel(id: "claude-custom-v1", name: "Claude", efforts: ["low", "high"])],
@@ -55,7 +59,9 @@ private func catalog(_ provider: String, _ _: String) throws -> ProviderModelCat
 
 /// A sign-in check is a CLI run like any other, and on a loaded Mac it can take many seconds. Only a check that
 /// finished and said so is "signed out". One that timed out, could not start or printed nothing readable is
-/// unknown: it is never cached and never stops a turn (the turn reports a real sign-out in its own words).
+/// unknown: it is never cached, and a turn is tried on it only when this Mac confirmed a subscription sign-in
+/// earlier (the turn then reports a real sign-out in its own words). Without that, nothing has ruled out an API
+/// key, so no turn runs, and the refusal does not call the Mac signed out.
 final class SignInCheckTests: XCTestCase {
     private var clock = Date(timeIntervalSince1970: 0)
 
@@ -65,14 +71,24 @@ final class SignInCheckTests: XCTestCase {
         return service
     }
 
+    /// A service on a Mac that confirmed a subscription sign-in a minute ago, with that answer no longer kept.
+    /// The runner's first answer must be that sign-in.
+    private func confirmedEarlier(_ runner: CheckRunner, _ provider: String = "claude") -> ProviderService {
+        let service = service(runner)
+        let first = service.status(provider)
+        XCTAssertTrue(first.checked && first.ready)
+        clock = clock.addingTimeInterval(ProviderService.signedInLifetime + 1)
+        return service
+    }
+
     // MARK: - What counts as signed out
 
     func testACheckThatTimesOutIsUnknownNotSignedOut() {
         let runner = CheckRunner([timesOut])
         let status = service(runner).status("claude")
         XCTAssertFalse(status.checked)
-        XCTAssertTrue(status.ready, "a sign-in nobody could check is tried, not refused")
-        XCTAssertEqual(status.message, "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway.")
+        XCTAssertFalse(status.ready, "nothing on this Mac has confirmed a subscription sign-in yet")
+        XCTAssertEqual(status.message, "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment.")
         XCTAssertNil(status.plan)
         XCTAssertEqual(runner.checkTimeouts, [ProviderService.signInTimeout, ProviderService.signInRetryTimeout], "one quick retry")
     }
@@ -87,12 +103,12 @@ final class SignInCheckTests: XCTestCase {
     func testACheckThatCannotStartOrSaysNothingReadableIsUnknown() {
         for answer in [cannotStart, unreadable, { ProcessResult(status: 0, stdout: #"{"authMethod":"claude.ai"}"#, stderr: "") }] {
             let status = service(CheckRunner([answer])).status("claude")
-            XCTAssertFalse(status.checked); XCTAssertTrue(status.ready)
+            XCTAssertFalse(status.checked); XCTAssertFalse(status.ready)
         }
         for answer in [cannotStart, timesOut, { ProcessResult(status: 0, stdout: "", stderr: "") }] {
             let status = service(CheckRunner([answer])).status("codex")
-            XCTAssertFalse(status.checked); XCTAssertTrue(status.ready)
-            XCTAssertEqual(status.message, "Couldn't check ChatGPT's sign-in just now — the Mac may be busy. Trying anyway.")
+            XCTAssertFalse(status.checked); XCTAssertFalse(status.ready)
+            XCTAssertEqual(status.message, "Couldn't check ChatGPT's sign-in just now — the Mac may be busy. Try again in a moment.")
         }
     }
 
@@ -157,19 +173,21 @@ final class SignInCheckTests: XCTestCase {
 
     // MARK: - The message path
 
-    func testAnUnknownSignInStillTriesTheTurn() throws {
-        let runner = CheckRunner([timesOut])
-        let output = try service(runner).generate(MessageRequest(provider: "claude", message: "Hello"))
+    func testAnUnknownSignInStillTriesTheTurnWhenTheMacConfirmedASubscriptionEarlier() throws {
+        let runner = CheckRunner([signedIn, timesOut])
+        let output = try confirmedEarlier(runner).generate(MessageRequest(provider: "claude", message: "Hello"))
         XCTAssertEqual(output["reply"] as? String, "Ready")
+        XCTAssertEqual(output["auth"] as? String, "subscription")
         XCTAssertEqual(runner.turnCount, 1)
-        let codex = CheckRunner([cannotStart], turn: CheckRunner.codexReply)
-        XCTAssertEqual(try service(codex).generate(MessageRequest(provider: "codex", message: "Hi"))["reply"] as? String, "Ready")
+        XCTAssertEqual(runner.checkCount, 3, "the turn's own check and its retry did not finish")
+        let codex = CheckRunner([chatGPT, cannotStart], turn: CheckRunner.codexReply)
+        XCTAssertEqual(try confirmedEarlier(codex, "codex").generate(MessageRequest(provider: "codex", message: "Hi"))["reply"] as? String, "Ready")
         XCTAssertEqual(codex.turnCount, 1)
     }
 
     func testATurnTriedOnAnUnknownSignInReportsARealSignOutInClaudesWords() {
-        let runner = CheckRunner([timesOut], turn: Fixture.result("claude-oauth-expired"))
-        XCTAssertThrowsError(try service(runner).generate(MessageRequest(provider: "claude", message: "Hello"))) { error in
+        let runner = CheckRunner([signedIn, timesOut], turn: Fixture.result("claude-oauth-expired"))
+        XCTAssertThrowsError(try confirmedEarlier(runner).generate(MessageRequest(provider: "claude", message: "Hello"))) { error in
             let failure = error as? ProviderFailure
             XCTAssertEqual(failure?.cause, .signedOut)
             XCTAssertNotNil(failure?.details)
@@ -186,19 +204,79 @@ final class SignInCheckTests: XCTestCase {
     }
 
     func testATurnWithAnEffortChecksSignInOnce() throws {
-        let runner = CheckRunner([timesOut])
-        _ = try service(runner).generate(MessageRequest(provider: "claude", message: "Hi", model: "claude-custom-v1", effort: "high"))
-        XCTAssertEqual(runner.checkCount, 2, "the check and its one retry; choosing the effort does not check again")
+        let runner = CheckRunner([signedIn, timesOut])
+        _ = try confirmedEarlier(runner).generate(MessageRequest(provider: "claude", message: "Hi", model: "claude-custom-v1", effort: "high"))
+        XCTAssertEqual(runner.checkCount, 3, "the earlier check, then the turn's check and its one retry; choosing the effort does not check again")
         XCTAssertEqual(runner.turnCount, 1)
+    }
+
+    // MARK: - API-key billing
+
+    /// For Codex the sign-in check is the only thing that refuses API-key billing, and a check that cannot finish
+    /// must not wave an API-key setup through: `codex exec` would bill the key. Refused, but not as signed out.
+    func testACodexAPIKeySetupWhoseCheckTimesOutRunsNoTurn() {
+        for script in [[timesOut], [codexAPIKey, timesOut]] {
+            let runner = CheckRunner(script, turn: CheckRunner.codexReply)
+            let service = service(runner)
+            if script.count > 1 {
+                XCTAssertFalse(service.status("codex").ready, "the check that finished found an API key")
+                clock = clock.addingTimeInterval(ProviderService.signedOutLifetime + 1)
+            }
+            XCTAssertThrowsError(try service.generate(MessageRequest(provider: "codex", message: "Hi"))) { error in
+                let failure = error as? ProviderFailure
+                XCTAssertEqual(failure?.cause, .providerUnavailable, "a busy Mac is not reported as signed out")
+                XCTAssertEqual(failure?.sentence(), "Couldn't check ChatGPT's sign-in just now — the Mac may be busy. Try again in a moment.")
+            }
+            XCTAssertEqual(runner.turnCount, 0, "no `codex exec` ran for \(script.count == 1 ? "an unchecked" : "an API-key") setup")
+        }
+    }
+
+    /// Claude's own API-key check on /message reads the finished turn, after it was billed, so an unchecked
+    /// Claude sign-in is held to the same rule.
+    func testAClaudeAPIKeySetupWhoseCheckTimesOutRunsNoTurn() {
+        for script in [[timesOut], [claudeAPIKey, timesOut]] {
+            let runner = CheckRunner(script)
+            let service = service(runner)
+            if script.count > 1 {
+                XCTAssertFalse(service.status("claude").ready)
+                clock = clock.addingTimeInterval(ProviderService.signedOutLifetime + 1)
+            }
+            XCTAssertThrowsError(try service.generate(MessageRequest(provider: "claude", message: "Hi"))) { error in
+                XCTAssertEqual((error as? ProviderFailure)?.cause, .providerUnavailable)
+                XCTAssertEqual((error as? ProviderFailure)?.sentence(), "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment.")
+            }
+            XCTAssertEqual(runner.turnCount, 0)
+        }
+    }
+
+    /// Only a subscription sign-in this Mac confirmed lets a turn go ahead unchecked, and a check that cannot
+    /// finish does not replace it: the next unknown is tried too, and a finished sign-out ends it.
+    func testAnUnknownCheckDoesNotReplaceTheLastFinishedAnswer() {
+        let runner = CheckRunner([chatGPT, timesOut, timesOut, timesOut, timesOut, { ProcessResult(status: 1, stdout: "", stderr: "Not logged in") }, timesOut],
+                                 turn: CheckRunner.codexReply)
+        let service = service(runner)
+        XCTAssertTrue(service.status("codex").ready)
+        for _ in 0..<2 {
+            clock = clock.addingTimeInterval(ProviderService.signedInLifetime + 1)
+            let status = service.status("codex")
+            XCTAssertFalse(status.checked)
+            XCTAssertTrue(status.ready, "this Mac confirmed a ChatGPT sign-in earlier")
+        }
+        XCTAssertFalse(service.status("codex").ready, "a finished sign-out replaces it")
+        clock = clock.addingTimeInterval(ProviderService.signedOutLifetime + 1)
+        XCTAssertFalse(service.status("codex").ready, "and an unknown after it is not tried")
     }
 
     // MARK: - Health and /status
 
     func testHealthSaysTheSignInCouldNotBeChecked() {
-        let health = service(CheckRunner([timesOut])).health("claude")
+        let health = confirmedEarlier(CheckRunner([signedIn, timesOut])).health("claude")
         XCTAssertEqual(health, ProviderHealth(installed: true, signedIn: true, account: "", cliVersion: "2.1.274", usage: .unknown, signInChecked: false))
         XCTAssertEqual(health.json["signInChecked"] as? Bool, false)
-        XCTAssertEqual(health.json["signedIn"] as? Bool, true, "older apps read `signedIn: false` as signed out")
+        XCTAssertEqual(health.json["signedIn"] as? Bool, true, "a turn is tried, and older apps read `signedIn: false` as signed out")
+        let unconfirmed = service(CheckRunner([timesOut])).health("claude")
+        XCTAssertEqual(unconfirmed, ProviderHealth(installed: true, signedIn: false, account: "", cliVersion: "2.1.274", usage: .unknown, signInChecked: false),
+                       "no turn is tried, and `signInChecked` says why")
         let checked = service(CheckRunner([signedIn])).health("claude")
         XCTAssertNil(checked.json["signInChecked"], "a finished check adds nothing to the 0.2.5 shape")
     }
@@ -218,7 +296,8 @@ final class SignInCheckTests: XCTestCase {
         let started = Date()
         let early = service.status("claude", wait: 0.05)
         XCTAssertLessThan(Date().timeIntervalSince(started), 1)
-        XCTAssertFalse(early.checked); XCTAssertTrue(early.ready)
+        XCTAssertFalse(early.checked)
+        XCTAssertFalse(early.ready, "nothing has confirmed a subscription sign-in yet")
         _ = service.status("claude", wait: 0.05)
         XCTAssertEqual(runner.checkCount, 1, "a second reader joins the check already running")
         gate.signal()

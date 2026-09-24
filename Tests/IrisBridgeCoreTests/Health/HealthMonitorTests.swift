@@ -3,10 +3,13 @@ import XCTest
 
 private final class ScriptedRunner: ProcessRunner, @unchecked Sendable {
     private let lock = NSLock()
-    private var _signedIn = true, _checkTimesOut = false, _claudeChecks = 0
+    /// What `codex login status` answers.
+    enum CodexSignIn { case chatGPT, apiKey, timesOut }
+    private var _signedIn = true, _checkTimesOut = false, _claudeChecks = 0, _codex = CodexSignIn.chatGPT
     var signedIn: Bool { get { lock.lock(); defer { lock.unlock() }; return _signedIn } set { lock.lock(); _signedIn = newValue; lock.unlock() } }
     /// Claude's sign-in check times out, the way it does on a Mac too busy to start a CLI in time.
     var checkTimesOut: Bool { get { lock.lock(); defer { lock.unlock() }; return _checkTimesOut } set { lock.lock(); _checkTimesOut = newValue; lock.unlock() } }
+    var codex: CodexSignIn { get { lock.lock(); defer { lock.unlock() }; return _codex } set { lock.lock(); _codex = newValue; lock.unlock() } }
     var claudeChecks: Int { lock.lock(); defer { lock.unlock() }; return _claudeChecks }
     func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
         if args.contains("--version") { return ProcessResult(status: 0, stdout: args[0].hasSuffix("claude") ? "2.1.274 (Claude Code)" : "codex-cli 0.155.0-alpha.9.2", stderr: "") }
@@ -15,7 +18,11 @@ private final class ScriptedRunner: ProcessRunner, @unchecked Sendable {
             if checkTimesOut { throw BridgeError.timeout }
             return ProcessResult(status: 0, stdout: signedIn ? #"{"loggedIn":true,"subscriptionType":"max","authMethod":"claude.ai"}"# : #"{"loggedIn":false}"#, stderr: "")
         }
-        return ProcessResult(status: 0, stdout: "", stderr: "Logged in using ChatGPT")
+        switch codex {
+        case .chatGPT: return ProcessResult(status: 0, stdout: "", stderr: "Logged in using ChatGPT")
+        case .apiKey: return ProcessResult(status: 0, stdout: "", stderr: "Logged in using an API key - sk-proj-***")
+        case .timesOut: throw BridgeError.timeout
+        }
     }
 }
 
@@ -81,16 +88,64 @@ final class HealthMonitorTests: XCTestCase {
         XCTAssertNil(monitor.readiness(.codex))
     }
 
-    func testASignInTheMacCouldNotCheckIsTriedNotRefused() {
-        runner.checkTimesOut = true
+    func testASignInTheMacCouldNotCheckIsTriedNotRefusedOnceASubscriptionWasConfirmed() {
         settle()
+        runner.checkTimesOut = true
+        clock.advance(ProviderService.signedInLifetime + 1)
+        monitor.refresh()
+        eventually("claude unchecked") { $0["claude"]?["signInChecked"] == false }
         XCTAssertNil(monitor.readiness(.claude), "a busy Mac is not a signed-out one")
         let claude = monitor.report()["claude"]
         XCTAssertEqual(claude?["signedIn"], true, "older apps read signedIn: false as signed out")
-        XCTAssertEqual(claude?["signInChecked"], false)
         XCTAssertEqual(claude?["account"], "")
-        XCTAssertEqual(runner.claudeChecks, 2, "one check and its one quick retry; health does not check again")
+        XCTAssertEqual(runner.claudeChecks, 3, "the first check, then one check and its one quick retry; health does not check again")
         XCTAssertNil(monitor.report()["codex"]?["signInChecked"], "a finished check adds nothing to the report")
+    }
+
+    /// With no subscription sign-in confirmed, a check that cannot finish has not ruled out an API key. Refused,
+    /// and not as signed out.
+    func testASignInTheMacCouldNeverCheckIsRefusedButNotAsSignedOut() {
+        runner.checkTimesOut = true
+        settle()
+        let failure = monitor.readiness(.claude)
+        XCTAssertEqual(failure?.cause, .providerUnavailable)
+        XCTAssertEqual(failure?.sentence(), "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment.")
+        XCTAssertEqual(monitor.report()["claude"]?["signedIn"], false)
+        XCTAssertEqual(monitor.report()["claude"]?["signInChecked"], false)
+    }
+
+    /// For Codex the sign-in check is the only thing that refuses API-key billing: a key `codex login
+    /// --with-api-key` saved survives a clean environment, and neither CodexStream nor CodexAdapter sees the auth
+    /// mode. thread.send must not start a Codex run because the check timed out.
+    func testACodexAPIKeySetupWhoseCheckTimesOutIsRefusedBeforeATurn() {
+        runner.codex = .timesOut
+        settle()
+        XCTAssertEqual(monitor.readiness(.codex)?.cause, .providerUnavailable, "never checked: no turn")
+        XCTAssertEqual(monitor.report()["codex"]?["signedIn"], false)
+        XCTAssertEqual(monitor.report()["codex"]?["signInChecked"], false)
+
+        runner.codex = .apiKey
+        monitor.refresh()
+        eventually("codex checked") { $0["codex"]?["signInChecked"] == nil }
+        XCTAssertEqual(monitor.readiness(.codex)?.cause, .signedOut, "an API key is not a subscription sign-in")
+
+        runner.codex = .timesOut
+        clock.advance(ProviderService.signedOutLifetime + 1)
+        monitor.refresh()
+        eventually("codex unchecked again") { $0["codex"]?["signInChecked"] == false }
+        let failure = monitor.readiness(.codex)
+        XCTAssertEqual(failure?.cause, .providerUnavailable, "the last finished answer was an API key: no turn")
+        XCTAssertEqual(failure?.sentence(), "Couldn't check ChatGPT's sign-in just now — the Mac may be busy. Try again in a moment.")
+    }
+
+    func testACodexChatGPTSignInWhoseLaterCheckTimesOutIsStillTried() {
+        settle()
+        runner.codex = .timesOut
+        clock.advance(ProviderService.signedInLifetime + 1)
+        monitor.refresh()
+        eventually("codex unchecked") { $0["codex"]?["signInChecked"] == false }
+        XCTAssertNil(monitor.readiness(.codex))
+        XCTAssertEqual(monitor.report()["codex"]?["signedIn"], true)
     }
 
     func testSigningInAfterARefusalIsPickedUpWithoutWaitingForTheTimer() {

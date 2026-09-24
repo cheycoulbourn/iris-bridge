@@ -96,8 +96,9 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
 public struct ProviderStatus: Codable, Equatable {
     public var provider: String
     /// Whether a turn for this provider is tried: when the Mac says it is signed in with a subscription, and also
-    /// when the sign-in check could not finish (`checked` is false). A busy Mac is not a signed-out one, and a
-    /// turn on a Mac that really is signed out fails with the provider's own words.
+    /// when the sign-in check could not finish (`checked` is false) but the last check that did finish found a
+    /// subscription sign-in. A busy Mac is not a signed-out one, and a turn on a Mac that really is signed out
+    /// fails with the provider's own words.
     public var ready: Bool
     public var message: String
     public var auth: String?; public var account: String?; public var model: String?
@@ -106,11 +107,15 @@ public struct ProviderStatus: Codable, Equatable {
     /// False when the sign-in check did not finish: it timed out, could not start, or printed nothing readable.
     public var checked = true
 
-    /// A sign-in check that did not finish. It is never kept and never counts as signed out.
-    public static func unknown(_ provider: String) -> ProviderStatus {
+    /// A sign-in check that did not finish. It is never kept and never counts as signed out. `tried` says whether
+    /// a turn goes ahead anyway, which only a subscription sign-in this Mac confirmed earlier allows: the check is
+    /// what keeps a turn off an API key (Codex bills a key `codex login --with-api-key` saved, whatever the
+    /// environment says, and Claude's own API-key check on /message reads a turn that was already billed).
+    public static func unknown(_ provider: String, tried: Bool) -> ProviderStatus {
         let name = provider == "claude" ? "Claude" : "ChatGPT"
-        return ProviderStatus(provider: provider, ready: true,
-                              message: "Couldn't check \(name)'s sign-in just now — the Mac may be busy. Trying anyway.", checked: false)
+        let next = tried ? "Trying anyway." : "Try again in a moment."
+        return ProviderStatus(provider: provider, ready: tried,
+                              message: "Couldn't check \(name)'s sign-in just now — the Mac may be busy. \(next)", checked: false)
     }
 }
 
@@ -229,9 +234,9 @@ public final class ProviderService: @unchecked Sendable {
     private var statusCache: [String: (expires: Date, status: ProviderStatus)] = [:]
     /// The sign-in check running for each provider. Everyone who asks while it runs waits for the same one.
     private var signInChecks: [String: SignInCheck] = [:]
-    /// What the last finished check said, finished or not. It answers a reader that cannot wait while the next
-    /// check runs, and only when it was a real answer.
-    private var lastSignIn: [String: ProviderStatus] = [:]
+    /// What the last check that finished said. A check that did not finish never replaces it. It answers a reader
+    /// that cannot wait while the next check runs, and decides whether a check that could not finish is tried.
+    private var lastFinished: [String: ProviderStatus] = [:]
     private var catalogCache: [String: (Date, ProviderModelCatalog)] = [:]
     /// `--version` per resolved binary, kept until the file on disk changes.
     private var versions: [String: (modified: Date?, version: String)] = [:]
@@ -275,7 +280,8 @@ public final class ProviderService: @unchecked Sendable {
     /// Whether this provider is signed in, from a finished answer that still counts or from a new check.
     /// `wait` is how long the caller can wait for a check: `nil` waits for it to finish, which the message path
     /// does. A reader that cannot wait (the app polls `/status` with a two-second timeout) gets the last real
-    /// answer, or `unknown` when there is none, and the check finishes in the background for the next reader.
+    /// answer, or an unknown that is not tried when there is none, and the check finishes in the background for
+    /// the next reader.
     public func status(_ provider: String, bypassCache: Bool = false, wait: TimeInterval? = nil) -> ProviderStatus {
         lock.lock()
         if !bypassCache, let cached = statusCache[provider], now() < cached.expires { lock.unlock(); return cached.status }
@@ -288,25 +294,28 @@ public final class ProviderService: @unchecked Sendable {
             signInChecks[provider] = check
             DispatchQueue.global().async { self.finish(check, provider: provider) }
         }
-        let last = lastSignIn[provider]
+        let last = lastFinished[provider]
         lock.unlock()
         if let wait, check.done.wait(timeout: .now() + wait) == .timedOut {
-            guard let last, last.checked else { return .unknown(provider) }
-            return last
+            return last ?? .unknown(provider, tried: false)
         }
         check.done.wait()
         lock.lock(); defer { lock.unlock() }
-        return check.result ?? .unknown(provider)
+        return check.result ?? .unknown(provider, tried: false)
     }
 
+    /// Keeps a finished answer. A check that did not finish is tried only when the last finished answer was a
+    /// subscription sign-in, and it replaces nothing, so the answer after it is judged the same way.
     private func finish(_ check: SignInCheck, provider: String) {
-        let fresh = checkStatus(provider)
+        var fresh = checkStatus(provider)
         lock.lock()
         signInChecks[provider] = nil
-        lastSignIn[provider] = fresh
         if fresh.checked {
+            lastFinished[provider] = fresh
             let lifetime = fresh.ready ? Self.signedInLifetime : Self.signedOutLifetime
             statusCache[provider] = (now().addingTimeInterval(lifetime), fresh)
+        } else {
+            fresh = .unknown(provider, tried: lastFinished[provider]?.ready == true)
         }
         check.result = fresh
         lock.unlock()
@@ -320,9 +329,10 @@ public final class ProviderService: @unchecked Sendable {
         return health(provider, signIn: status(provider))
     }
 
-    /// The same card from a sign-in answer the caller already has, so one `/status` checks each CLI once. A
-    /// sign-in nobody could check is not reported as signed out: `signedIn` follows `ready`, which older apps
-    /// read, and `signInChecked` says the check did not finish.
+    /// The same card from a sign-in answer the caller already has, so one `/status` checks each CLI once.
+    /// `signedIn` follows `ready`, which older apps read: a sign-in nobody could check is signed in when a turn
+    /// is still tried (the Mac confirmed a subscription sign-in earlier), and `signInChecked` says the check did
+    /// not finish.
     public func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth {
         guard let binary = lookup(provider) else { return Self.notInstalled }
         let remembered = usage.current(provider)
@@ -360,7 +370,7 @@ public final class ProviderService: @unchecked Sendable {
     /// A timeout, a CLI that would not start, or an answer this cannot read is `unknown`, never signed out.
     private func askSignIn(_ provider: String, binary: String, timeout: TimeInterval) -> ProviderStatus {
         let args = provider == "claude" ? [binary, "auth", "status", "--json"] : [binary, "login", "status"]
-        guard let result = try? runner.run(args, input: nil, cwd: nil, timeout: timeout, requestID: nil) else { return .unknown(provider) }
+        guard let result = try? runner.run(args, input: nil, cwd: nil, timeout: timeout, requestID: nil) else { return .unknown(provider, tried: false) }
         return provider == "claude" ? Self.claudeSignIn(result) : Self.codexSignIn(result)
     }
 
@@ -370,14 +380,14 @@ public final class ProviderService: @unchecked Sendable {
     /// key or carries no subscription. JSON without `loggedIn`, or a sign-in with a failing exit status, is unknown.
     static func claudeSignIn(_ result: ProcessResult) -> ProviderStatus {
         guard let auth = (try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8))) as? [String: Any],
-              let loggedIn = auth["loggedIn"] as? Bool else { return .unknown("claude") }
+              let loggedIn = auth["loggedIn"] as? Bool else { return .unknown("claude", tried: false) }
         let email = auth["email"] as? String
         let method = auth["authMethod"] as? String ?? ""
         let subscription = auth["subscriptionType"] as? String ?? ""
         guard loggedIn, !["api_key", "apiKey"].contains(method), !subscription.isEmpty else {
             return ProviderStatus(provider: "claude", ready: false, message: signedOutMessage, auth: "unavailable", account: email)
         }
-        guard result.status == 0 else { return .unknown("claude") }
+        guard result.status == 0 else { return .unknown("claude", tried: false) }
         let plan = subscription.capitalized
         return ProviderStatus(provider: "claude", ready: true, message: "Signed in with Claude \(plan). Your plan limits and extra-usage settings apply.",
                               auth: "subscription", account: email, plan: plan)
@@ -390,11 +400,11 @@ public final class ProviderService: @unchecked Sendable {
         let signedOut = ProviderStatus(provider: "codex", ready: false, message: signedOutMessage, auth: "unavailable")
         if said.contains("not logged in") { return signedOut }
         if said.contains("chatgpt") {
-            guard result.status == 0 else { return .unknown("codex") }
+            guard result.status == 0 else { return .unknown("codex", tried: false) }
             return ProviderStatus(provider: "codex", ready: true, message: "Signed in with ChatGPT. Your plan limits apply.", auth: "subscription")
         }
         if said.contains("logged in") || said.contains("api key") { return signedOut }
-        return .unknown("codex")
+        return .unknown("codex", tried: false)
     }
     public func models(_ provider: String) -> ProviderModelCatalog {
         guard ["claude", "codex"].contains(provider) else {
@@ -602,9 +612,17 @@ public final class ProviderService: @unchecked Sendable {
         guard let binary = lookup(provider) else {
             throw ProviderFailure(cause: .providerUnavailable, provider: provider, details: health.message, message: health.message)
         }
-        // Only a check that finished and found no subscription sign-in refuses here. One that could not finish is
-        // `ready`: the turn is tried, and a Mac that really is signed out says so in the provider's own words.
-        guard health.ready else { throw ProviderFailure(cause: .signedOut, provider: provider, details: health.message) }
+        // A check that finished and found no subscription sign-in is signed out. One that could not finish is
+        // `ready` when this Mac confirmed a subscription sign-in earlier: the turn is tried, and a Mac that really
+        // is signed out says so in the provider's own words. Otherwise nothing has ruled out an API key, which
+        // `codex exec` would bill (the environment cannot strip a key Codex saved) and Claude's own check below
+        // catches only after the turn, so no turn runs; a busy Mac is still not called signed out.
+        guard health.ready else {
+            guard health.checked else {
+                throw ProviderFailure(cause: .providerUnavailable, provider: provider, details: health.message, message: health.message)
+            }
+            throw ProviderFailure(cause: .signedOut, provider: provider, details: health.message)
+        }
         let effort = try selectedEffort(for: request, signIn: health)
         var clean: [String: Any] = ["provider": provider, "message": request.message]
         clean["id"] = request.id; clean["context"] = request.context; clean["history"] = request.history; clean["skills"] = request.skills

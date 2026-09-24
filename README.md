@@ -20,6 +20,11 @@ comes with it, so a usage limit reads as a usage limit, not as "check your conne
 `iris-bridge status` shows each provider's sign-in, plan and command-line tool version, what the last chat
 turn said about usage, and the names and addresses you can type into Iris to reach this Mac.
 
+A Mac that is too busy to answer the sign-in check in time is not treated as signed out (0.2.6). The helper
+reports "Couldn't check Claude's sign-in just now — the Mac may be busy. Trying anyway." and still sends the
+message; if Claude or ChatGPT really is signed out, the reply says so. Signing in on the Mac shows up within about
+ten seconds.
+
 Iris Bridge no longer updates Claude Code for you in the middle of a chat. Update it yourself with
 `claude update`; the app shows the version the helper sees.
 

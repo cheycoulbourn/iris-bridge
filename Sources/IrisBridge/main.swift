@@ -35,11 +35,15 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
         log.info("pruned \(removed) decided submissions older than 30 days")
     }
     let context = ContextStore(file: paths.context)
+    let generator = LiveGenerator()
     let router = Router(fingerprint: identity.fingerprint, hostName: HostName.computerName(), adminToken: adminToken, devices: devices, pairing: pairing,
-                        inbox: inbox, context: context, generator: LiveGenerator(), log: log)
+                        inbox: inbox, context: context, generator: generator, log: log)
     let server = try BridgeServer(port: port, identity: identity, router: router, serviceName: HostName.computerName(), advertise: bonjour, log: log)
     signal(SIGPIPE, SIG_IGN)
     try server.start()
+    // A cold `claude auth status` can outlast the app's first poll, so both checks start now, behind the listener,
+    // and that poll finds a finished answer.
+    generator.startSignInChecks()
     print("Iris Bridge \(BridgeVersion.current) is running on port \(server.actualPort ?? port).")
     if devices.all.isEmpty {
         // Under launchd, stdout is a log file: a code printed here would sit on disk for anyone who can read

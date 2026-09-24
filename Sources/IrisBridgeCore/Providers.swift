@@ -107,6 +107,13 @@ public struct ProviderStatus: Codable, Equatable {
     /// False when the sign-in check did not finish: it timed out, could not start, or printed nothing readable.
     public var checked = true
 
+    /// What apps are shown: `/status`'s `ready` and health's `signedIn`. Only a check that finished and found no
+    /// subscription sign-in, or a missing CLI, is shown as not signed in. A check that could not finish (a busy
+    /// Mac) is shown as signed in whether or not a turn is tried on it, because every Iris app shows false as "not
+    /// signed in" with the sign-in command, and signing in again fixes nothing on a busy Mac. Whether a turn runs is
+    /// `ready`, which the message path enforces on its own: an untried one is refused as `providerUnavailable`.
+    public var shownSignedIn: Bool { ready || !checked }
+
     /// A sign-in check that did not finish. It is never kept and never counts as signed out. `tried` says whether
     /// a turn goes ahead anyway, which only a subscription sign-in this Mac confirmed earlier allows: the check is
     /// what keeps a turn off an API key (Codex bills a key `codex login --with-api-key` saved, whatever the
@@ -304,6 +311,14 @@ public final class ProviderService: @unchecked Sendable {
         return check.result ?? .unknown(provider, tried: false)
     }
 
+    /// Starts both providers' sign-in checks and returns without waiting for them. `iris-bridge serve` calls this as
+    /// it starts, so the app's first poll and the first message find an answer that already finished, and a
+    /// subscription sign-in confirmed, instead of starting a cold check, which can take seconds and many more on a
+    /// busy Mac.
+    public func startSignInChecks() {
+        for provider in ["claude", "codex"] { _ = status(provider, wait: 0) }
+    }
+
     /// Keeps a finished answer. A check that did not finish is tried only when the last finished answer was a
     /// subscription sign-in, and it replaces nothing, so the answer after it is judged the same way.
     private func finish(_ check: SignInCheck, provider: String) {
@@ -330,13 +345,12 @@ public final class ProviderService: @unchecked Sendable {
     }
 
     /// The same card from a sign-in answer the caller already has, so one `/status` checks each CLI once.
-    /// `signedIn` follows `ready`, which older apps read: a sign-in nobody could check is signed in when a turn
-    /// is still tried (the Mac confirmed a subscription sign-in earlier), and `signInChecked` says the check did
-    /// not finish.
+    /// `signedIn` is what apps show (`shownSignedIn`): a sign-in nobody could check is never shown as signed out,
+    /// and `signInChecked` says the check did not finish. It does not say whether a turn is tried; `ready` does.
     public func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth {
         guard let binary = lookup(provider) else { return Self.notInstalled }
         let remembered = usage.current(provider)
-        return ProviderHealth(installed: true, signedIn: signIn.ready, account: signIn.ready ? (signIn.plan ?? "") : "",
+        return ProviderHealth(installed: true, signedIn: signIn.shownSignedIn, account: signIn.ready ? (signIn.plan ?? "") : "",
                               cliVersion: cliVersion(binary: binary), usage: remembered.usage,
                               resetsAt: remembered.resetsAt, lastErrorCause: remembered.lastErrorCause, signInChecked: signIn.checked)
     }

@@ -24,7 +24,8 @@ A Mac that is too busy to answer the sign-in check in time is not treated as sig
 has seen your subscription sign-in, it reports "Couldn't check Claude's sign-in just now — the Mac may be busy.
 Trying anyway." and still sends the message; if Claude or ChatGPT really is signed out, the reply says so. Until
 it has seen one, it asks you to try again in a moment instead, so a message is never billed to an API key the
-check would have caught. Signing in on the Mac shows up within about ten seconds.
+check would have caught. Either way Iris shows the Mac as connected, not signed out. Signing in on the Mac shows
+up within about ten seconds.
 
 Iris Bridge no longer updates Claude Code for you in the middle of a chat. Update it yourself with
 `claude update`; the app shows the version the helper sees.

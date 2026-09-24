@@ -45,6 +45,11 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
         guard now().timeIntervalSince(marked) < 600 else { canceled[id] = nil; return false }
         return true
     }
+    /// How long a run keeps reading once its process has exited. Everything the process wrote is in the pipes by
+    /// then, so the readers need a moment at most; one still waiting after this is waiting on something the process
+    /// started and left running with the pipe open, which could hold it for as long as it likes.
+    static let drainGrace: TimeInterval = 2
+
     public func run(_ args: [String], input: String?, cwd: URL?, timeout: TimeInterval, requestID: String?) throws -> ProcessResult {
         if isCanceled(requestID) { throw BridgeError.canceled }
         let process = Process()
@@ -58,17 +63,13 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
         try process.run()
         if let requestID { lock.lock(); active[requestID] = process; lock.unlock() }
         defer { if let requestID { lock.lock(); active[requestID] = nil; lock.unlock() } }
-        var outData = Data(), errData = Data()
-        let group = DispatchGroup()
-        group.enter(); DispatchQueue.global().async { outData = stdout.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-        group.enter(); DispatchQueue.global().async { errData = stderr.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-        group.enter(); DispatchQueue.global().async {
-            let handle = stdin.fileHandleForWriting
+        let out = PipeReader(stdout.fileHandleForReading), err = PipeReader(stderr.fileHandleForReading)
+        let handle = stdin.fileHandleForWriting
+        Thread.detachNewThread {
             // Report a broken pipe as an error instead of killing this process when the child is signaled.
-            fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
+            _ = fcntl(handle.fileDescriptor, F_SETNOSIGPIPE, 1)
             if let input { try? handle.write(contentsOf: Data(input.utf8)) }
             try? handle.close()
-            group.leave()
         }
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.05) }
         // Foundation launches the child as its own process-group leader, so the group signal reaches its children too.
@@ -77,20 +78,49 @@ public final class ForegroundProcessRunner: ProcessRunner, @unchecked Sendable {
             // Never waitUntilExit() here: a child that traps SIGTERM would hang this thread, and with it the
             // one request the helper allows at a time. Poll to a deadline, then kill.
             Self.escalate(process)
-            // The reader threads finish when the last writer to each pipe goes away, which the killed process
-            // group takes care of. If something inherited a write end and outlived the group, the bounded wait
-            // expires and this thread returns anyway. Closing the read ends here would be worse than waiting:
-            // a reader blocked inside readDataToEndOfFile on a handle closed underneath it raises
-            // NSFileHandleOperationException, which cannot be caught from Swift and would take the helper
-            // down. The stragglers are left alone; they unblock and release the pipes when the last writer
-            // goes, and the Pipe objects die with them.
-            _ = group.wait(timeout: .now() + 5)
+            // What it wrote is not used, so nothing waits for the readers: they end on their own when the last
+            // writer to each pipe goes, which may be something that left the process group and outlives it.
             throw BridgeError.timeout
         }
-        group.wait()
+        // The process exited. Whatever still holds a pipe open (a helper it started and detached, say) wrote
+        // nothing of the answer, so the run ends after the grace with what was read, however long that lasts.
+        let drained = DispatchTime.now() + Self.drainGrace
+        out.wait(until: drained); err.wait(until: drained)
         if isCanceled(requestID) { throw BridgeError.canceled }
-        return ProcessResult(status: process.terminationStatus, stdout: String(data: outData, encoding: .utf8) ?? "", stderr: String(data: errData, encoding: .utf8) ?? "")
+        return ProcessResult(status: process.terminationStatus, stdout: String(data: out.data, encoding: .utf8) ?? "", stderr: String(data: err.data, encoding: .utf8) ?? "")
     }
+}
+
+/// Reads a pipe to its end on a thread of its own and keeps what it read, so a run can stop waiting for the end
+/// without closing the pipe underneath the reader. (A read end closed under a blocked `FileHandle` read raises an
+/// Objective-C exception, which Swift cannot catch and which would take the helper down.) The thread ends when the
+/// last writer to the pipe goes away.
+final class PipeReader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var collected = Data()
+    private let ended = DispatchGroup()
+
+    init(_ handle: FileHandle) {
+        ended.enter()
+        Thread.detachNewThread { [self] in
+            // `handle` is held by this closure, so its descriptor stays open for as long as it is read.
+            let descriptor = handle.fileDescriptor
+            var buffer = [UInt8](repeating: 0, count: 65_536)
+            while true {
+                let count = read(descriptor, &buffer, buffer.count)
+                if count > 0 { lock.lock(); collected.append(buffer, count: count); lock.unlock(); continue }
+                if count < 0 && errno == EINTR { continue }
+                break
+            }
+            ended.leave()
+        }
+    }
+
+    /// Waits for the end of the pipe until `deadline`; says whether it came.
+    @discardableResult func wait(until deadline: DispatchTime) -> Bool { ended.wait(timeout: deadline) == .success }
+
+    /// What was read so far.
+    var data: Data { lock.lock(); defer { lock.unlock() }; return collected }
 }
 
 public struct ProviderStatus: Codable, Equatable {
@@ -245,8 +275,10 @@ public final class ProviderService: @unchecked Sendable {
     /// that cannot wait while the next check runs, and decides whether a check that could not finish is tried.
     private var lastFinished: [String: ProviderStatus] = [:]
     private var catalogCache: [String: (Date, ProviderModelCatalog)] = [:]
-    /// `--version` per resolved binary, kept until the file on disk changes.
+    /// `--version` per resolved binary, kept until the file on disk changes. A read that did not finish is not kept.
     private var versions: [String: (modified: Date?, version: String)] = [:]
+    /// The `--version` read running for each resolved binary. Everyone who asks while it runs waits for the same one.
+    private var versionReads: [String: VersionRead] = [:]
     private let usage: UsageMemory
     private let lock = NSLock()
     public init(runner: ProcessRunner, executableLookup: @escaping (String) -> String? = ProviderService.findExecutable,
@@ -272,8 +304,22 @@ public final class ProviderService: @unchecked Sendable {
     public static let signInTimeout: TimeInterval = 20
     /// The one quick retry after a check that did not finish.
     public static let signInRetryTimeout: TimeInterval = 10
+    /// The longest anyone waits on a sign-in check, counted from when the check started: both tries, the pause
+    /// between them, and room for a CLI that has to be killed. A check still running then is answered as one that
+    /// could not finish and keeps running; the next check starts when it ends. A message, a model list or a health
+    /// round never waits on a stuck check for longer than this.
+    public static let signInWaitLimit: TimeInterval = signInTimeout + signInRetryTimeout + 20
+    /// How long `/models` waits for a sign-in check. The app gives the request 30 seconds, and listing the models
+    /// can take 12 more after it.
+    public static let modelsSignInWait: TimeInterval = 10
+    /// How long a caller that can wait waits for `--version`: its 5-second run and the kill after it.
+    static let versionWaitLimit: TimeInterval = 10
     /// The pause before that retry. Tests set it to zero.
     var signInRetryPause: TimeInterval = 0.5
+    /// The two tries' timeouts, `signInWaitLimit` and `modelsSignInWait` for this service. Tests shorten them.
+    var signInTimeouts = (first: ProviderService.signInTimeout, retry: ProviderService.signInRetryTimeout)
+    var signInWait = ProviderService.signInWaitLimit
+    var modelsWait = ProviderService.modelsSignInWait
     /// A sign-in is kept for a minute, as in 0.2.5. A sign-out is kept only briefly, so signing in on the Mac
     /// shows up at once.
     static let signedInLifetime: TimeInterval = 60
@@ -281,42 +327,87 @@ public final class ProviderService: @unchecked Sendable {
 
     private final class SignInCheck {
         let done = DispatchGroup()
+        /// When everyone stops waiting for it, whether or not it has finished.
+        let deadline: DispatchTime
         var result: ProviderStatus?
+        init(deadline: DispatchTime) { self.deadline = deadline }
+    }
+
+    private final class VersionRead { let done = DispatchGroup() }
+
+    /// A finished answer that still counts, or the check to wait for with the last answer that finished.
+    private enum SignInRead {
+        case kept(ProviderStatus), running(SignInCheck, last: ProviderStatus?)
+        /// What a reader that could not wait for the check is told: the last answer that finished, or an unknown
+        /// that is not tried.
+        func pending(_ provider: String) -> ProviderStatus {
+            guard case .running(_, let last?) = self else { return .unknown(provider, tried: false) }
+            return last
+        }
+        /// What a reader that waited as long as anyone waits is told: a check that could not finish, tried only when
+        /// the last answer that finished was a subscription sign-in (as `finish` would have said).
+        func gaveUp(_ provider: String) -> ProviderStatus {
+            guard case .running(_, let last) = self else { return .unknown(provider, tried: false) }
+            return .unknown(provider, tried: last?.ready == true)
+        }
     }
 
     /// Whether this provider is signed in, from a finished answer that still counts or from a new check.
-    /// `wait` is how long the caller can wait for a check: `nil` waits for it to finish, which the message path
-    /// does. A reader that cannot wait (the app polls `/status` with a two-second timeout) gets the last real
-    /// answer, or an unknown that is not tried when there is none, and the check finishes in the background for
-    /// the next reader.
+    /// `wait` is how long the caller can wait for a check. A reader that cannot wait (the app polls `/status` with a
+    /// two-second timeout) gets the last real answer, or an unknown that is not tried when there is none, and the
+    /// check finishes in the background for the next reader. `nil` waits for the check to finish, which the message
+    /// path does, but never past the check's own deadline (`signInWaitLimit` from its start); a check still running
+    /// then is answered as one that could not finish.
     public func status(_ provider: String, bypassCache: Bool = false, wait: TimeInterval? = nil) -> ProviderStatus {
-        lock.lock()
-        if !bypassCache, let cached = statusCache[provider], now() < cached.expires { lock.unlock(); return cached.status }
-        let check: SignInCheck
-        if let running = signInChecks[provider] {
-            check = running
-        } else {
-            check = SignInCheck()
-            check.done.enter()
-            signInChecks[provider] = check
-            DispatchQueue.global().async { self.finish(check, provider: provider) }
-        }
-        let last = lastFinished[provider]
-        lock.unlock()
-        if let wait, check.done.wait(timeout: .now() + wait) == .timedOut {
-            return last ?? .unknown(provider, tried: false)
-        }
-        check.done.wait()
-        lock.lock(); defer { lock.unlock() }
-        return check.result ?? .unknown(provider, tried: false)
+        let read = beginSignIn(provider, bypassCache: bypassCache)
+        if let finished = answer(provider, read, until: wait.map { .now() + $0 }) { return finished }
+        return wait == nil ? read.gaveUp(provider) : read.pending(provider)
     }
 
-    /// Starts both providers' sign-in checks and returns without waiting for them. `iris-bridge serve` calls this as
-    /// it starts, so the app's first poll and the first message find an answer that already finished, and a
-    /// subscription sign-in confirmed, instead of starting a cold check, which can take seconds and many more on a
-    /// busy Mac.
+    /// Both answers `/status` needs, under one deadline rather than one per provider. Every check is started (or
+    /// joined) before any is waited for, and each CLI's version is read in the same wait, so the health built from
+    /// these answers does not wait again.
+    public func statuses(_ providers: [String], wait: TimeInterval) -> [String: ProviderStatus] {
+        let until = DispatchTime.now() + wait
+        let reads = providers.map { ($0, beginSignIn($0, bypassCache: false)) }
+        let versionReads = providers.compactMap { lookup($0) }.compactMap { beginVersion(binary: $0).read }
+        var answers: [String: ProviderStatus] = [:]
+        for (provider, read) in reads { answers[provider] = answer(provider, read, until: until) ?? read.pending(provider) }
+        for read in versionReads { _ = read.done.wait(timeout: until) }
+        return answers
+    }
+
+    private func beginSignIn(_ provider: String, bypassCache: Bool) -> SignInRead {
+        lock.lock(); defer { lock.unlock() }
+        if !bypassCache, let cached = statusCache[provider], now() < cached.expires { return .kept(cached.status) }
+        if let running = signInChecks[provider] { return .running(running, last: lastFinished[provider]) }
+        let check = SignInCheck(deadline: .now() + signInWait)
+        check.done.enter()
+        signInChecks[provider] = check
+        DispatchQueue.global().async { self.finish(check, provider: provider) }
+        return .running(check, last: lastFinished[provider])
+    }
+
+    /// The answer, if there is one by `until` (nil: by the check's deadline). Never waits past the check's deadline.
+    private func answer(_ provider: String, _ read: SignInRead, until: DispatchTime?) -> ProviderStatus? {
+        switch read {
+        case .kept(let status): return status
+        case .running(let check, _):
+            guard check.done.wait(timeout: min(until ?? check.deadline, check.deadline)) == .success else { return nil }
+            lock.lock(); defer { lock.unlock() }
+            return check.result ?? .unknown(provider, tried: false)
+        }
+    }
+
+    /// Starts both providers' sign-in checks and reads both CLIs' versions, and returns without waiting for any of
+    /// them. `iris-bridge serve` calls this as it starts, so the app's first poll and the first message find answers
+    /// that already finished, and a subscription sign-in confirmed, instead of starting a cold CLI, which can take
+    /// seconds and many more on a busy Mac.
     public func startSignInChecks() {
-        for provider in ["claude", "codex"] { _ = status(provider, wait: 0) }
+        for provider in ["claude", "codex"] {
+            _ = beginSignIn(provider, bypassCache: false)
+            if let binary = lookup(provider) { _ = beginVersion(binary: binary) }
+        }
     }
 
     /// Keeps a finished answer. A check that did not finish is tried only when the last finished answer was a
@@ -324,7 +415,7 @@ public final class ProviderService: @unchecked Sendable {
     private func finish(_ check: SignInCheck, provider: String) {
         var fresh = checkStatus(provider)
         lock.lock()
-        signInChecks[provider] = nil
+        if signInChecks[provider] === check { signInChecks[provider] = nil }
         if fresh.checked {
             lastFinished[provider] = fresh
             let lifetime = fresh.ready ? Self.signedInLifetime : Self.signedOutLifetime
@@ -347,38 +438,63 @@ public final class ProviderService: @unchecked Sendable {
     /// The same card from a sign-in answer the caller already has, so one `/status` checks each CLI once.
     /// `signedIn` is what apps show (`shownSignedIn`): a sign-in nobody could check is never shown as signed out,
     /// and `signInChecked` says the check did not finish. It does not say whether a turn is tried; `ready` does.
-    public func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth {
+    /// `versionWait` is how long the CLI version may take (nil: as long as it takes, within `versionWaitLimit`);
+    /// `/status` passes 0 because `statuses` already waited for it.
+    public func health(_ provider: String, signIn: ProviderStatus, versionWait: TimeInterval? = nil) -> ProviderHealth {
         guard let binary = lookup(provider) else { return Self.notInstalled }
         let remembered = usage.current(provider)
         return ProviderHealth(installed: true, signedIn: signIn.shownSignedIn, account: signIn.ready ? (signIn.plan ?? "") : "",
-                              cliVersion: cliVersion(binary: binary), usage: remembered.usage,
+                              cliVersion: cliVersion(binary: binary, wait: versionWait), usage: remembered.usage,
                               resetsAt: remembered.resetsAt, lastErrorCause: remembered.lastErrorCause, signInChecked: signIn.checked)
     }
 
     private static let notInstalled = ProviderHealth(installed: false, signedIn: false, account: "", cliVersion: "", usage: .unknown)
 
     /// `--version`, asked once per binary and again only when the file behind it changes, so an update the
-    /// owner makes shows up without the helper running the CLI on every status poll.
-    func cliVersion(binary: String) -> String {
+    /// owner makes shows up without the helper running the CLI on every status poll. A read that did not finish
+    /// (it timed out, or the CLI would not start) is not kept, so the next read asks again; until one finishes
+    /// the version is "". `wait` is how long the caller waits for a read (nil: `versionWaitLimit`); one that is
+    /// still running then finishes behind it for the next caller.
+    func cliVersion(binary: String, wait: TimeInterval? = nil) -> String {
+        let (known, read, key) = beginVersion(binary: binary)
+        if let known { return known }
+        _ = read?.done.wait(timeout: .now() + (wait ?? Self.versionWaitLimit))
+        lock.lock(); defer { lock.unlock() }
+        guard let kept = versions[key.resolved], kept.modified == key.modified else { return "" }
+        return kept.version
+    }
+
+    /// The version known for the binary as it is on disk now, or the read that will find it: the one running, or
+    /// one started now.
+    private func beginVersion(binary: String) -> (known: String?, read: VersionRead?, key: (resolved: String, modified: Date?)) {
         let resolved = URL(fileURLWithPath: binary).resolvingSymlinksInPath().path
         let modified = (try? FileManager.default.attributesOfItem(atPath: resolved))?[.modificationDate] as? Date
-        lock.lock()
-        if let cached = versions[resolved], cached.modified == modified { lock.unlock(); return cached.version }
-        lock.unlock()
-        let output = (try? runner.run([binary, "--version"], input: nil, cwd: nil, timeout: 5, requestID: nil)).map { $0.stdout + $0.stderr } ?? ""
-        let version = ProviderHealth.version(from: output)
-        lock.lock(); versions[resolved] = (modified, version); lock.unlock()
-        return version
+        lock.lock(); defer { lock.unlock() }
+        if let cached = versions[resolved], cached.modified == modified { return (cached.version, nil, (resolved, modified)) }
+        if let running = versionReads[resolved] { return (nil, running, (resolved, modified)) }
+        let read = VersionRead()
+        read.done.enter()
+        versionReads[resolved] = read
+        DispatchQueue.global().async {
+            let output = try? self.runner.run([binary, "--version"], input: nil, cwd: nil, timeout: 5, requestID: nil)
+            self.lock.lock()
+            self.versionReads[resolved] = nil
+            if let output { self.versions[resolved] = (modified, ProviderHealth.version(from: output.stdout + output.stderr)) }
+            self.lock.unlock()
+            read.done.leave()
+        }
+        return (nil, read, (resolved, modified))
     }
+
     /// One check and, when it does not finish, one quick retry. A missing CLI is a finished answer.
     private func checkStatus(_ provider: String) -> ProviderStatus {
         guard let binary = lookup(provider) else {
             return ProviderStatus(provider: provider, ready: false, message: "Install \(provider == "claude" ? "Claude Code" : "Codex") on your Mac first.")
         }
-        let first = askSignIn(provider, binary: binary, timeout: Self.signInTimeout)
+        let first = askSignIn(provider, binary: binary, timeout: signInTimeouts.first)
         guard !first.checked else { return first }
         if signInRetryPause > 0 { Thread.sleep(forTimeInterval: signInRetryPause) }
-        return askSignIn(provider, binary: binary, timeout: Self.signInRetryTimeout)
+        return askSignIn(provider, binary: binary, timeout: signInTimeouts.retry)
     }
 
     /// A timeout, a CLI that would not start, or an answer this cannot read is `unknown`, never signed out.
@@ -424,7 +540,27 @@ public final class ProviderService: @unchecked Sendable {
         guard ["claude", "codex"].contains(provider) else {
             return ProviderModelCatalog(provider: provider, models: [], source: "unavailable", notice: "Choose Claude Code or Codex.")
         }
-        return models(provider, signIn: status(provider))
+        // The app gives `/models` 30 seconds, so it waits on a sign-in check for `modelsWait` at most. A check that
+        // has not finished by then (a busy Mac) is not waited out: no CLI is started for a list either.
+        guard let signIn = answer(provider, beginSignIn(provider, bypassCache: false), until: .now() + modelsWait) else {
+            return catalogWhileChecking(provider)
+        }
+        return models(provider, signIn: signIn)
+    }
+
+    /// The model list while the sign-in check is still running: the last list this Mac gave, when the last check
+    /// that finished found a subscription sign-in, and otherwise a plain try-again.
+    private func catalogWhileChecking(_ provider: String) -> ProviderModelCatalog {
+        let couldNotCheck = ProviderStatus.unknown(provider, tried: false).message
+        lock.lock(); defer { lock.unlock() }
+        guard lastFinished[provider]?.ready == true, var catalog = catalogCache[provider]?.1, !catalog.models.isEmpty else {
+            return ProviderModelCatalog(provider: provider, models: [], source: "unavailable", notice: couldNotCheck)
+        }
+        catalog.source = "cached-" + catalog.source
+        let name = provider == "claude" ? "Claude" : "ChatGPT"
+        catalog.notice = [catalog.notice, "Couldn't check \(name)'s sign-in just now — the Mac may be busy. These are the model choices from earlier."]
+            .compactMap { $0 }.joined(separator: " ")
+        return catalog
     }
 
     /// The catalog for a sign-in answer already in hand, so a turn that chose an effort checks sign-in once.

@@ -28,7 +28,20 @@ Run the install command again to pick this up. Older Iris apps keep working unch
   and adds `signInChecked: false` in both cases; nothing else in the reply changes, and a finished check sends
   exactly the 0.2.5 shape. `iris-bridge status` prints "sign-in unknown" for it.
 - Both sign-in checks start as the helper starts, so the app's first poll after an install, a login or a restart
-  finds a finished answer instead of waiting on a cold check, which can outlast that poll.
+  finds a finished answer instead of waiting on a cold check, which can outlast that poll. Both CLI versions are
+  read then too.
+- A sign-in check that never finishes holds nothing up. A message waits for one at most 50 seconds from when it
+  started (both tries, and the kill of a CLI that ignores the stop signal), then is answered as a check that could
+  not finish while the check carries on; the next message, model list or poll does not wait on it again, and the
+  helper takes the next message instead of answering "still answering another message". A CLI that answers and
+  exits but leaves something running with its output open no longer keeps its sign-in check, or a chat turn,
+  going: the helper stops reading two seconds after the CLI exits.
+- `/status` waits at most 0.75 seconds in all, for both providers' sign-in checks and CLI versions together, where
+  it waited 0.75 seconds for each check and then as long as `--version` took.
+- A CLI version read that times out is asked again next time, instead of showing no version until the CLI changes.
+- `/models` waits at most 10 seconds for a sign-in check, well inside the app's 30. When the check is still
+  running it starts no CLI and answers with the model list this Mac gave last, if a subscription sign-in was
+  confirmed, or with "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment."
 
 ## 0.2.5
 

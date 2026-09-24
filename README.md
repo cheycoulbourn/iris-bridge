@@ -25,7 +25,8 @@ has seen your subscription sign-in, it reports "Couldn't check Claude's sign-in 
 Trying anyway." and still sends the message; if Claude or ChatGPT really is signed out, the reply says so. Until
 it has seen one, it asks you to try again in a moment instead, so a message is never billed to an API key the
 check would have caught. Either way Iris shows the Mac as connected, not signed out. Signing in on the Mac shows
-up within about ten seconds.
+up within about ten seconds. A sign-in check that never finishes holds nothing up: a message waits for it at most
+50 seconds, the model list at most 10, and the connection status under a second.
 
 Iris Bridge no longer updates Claude Code for you in the middle of a chat. Update it yourself with
 `claude update`; the app shows the version the helper sees.

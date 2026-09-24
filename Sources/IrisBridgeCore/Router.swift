@@ -6,6 +6,8 @@ public struct RequestContext { public var sourceAddress: String; public var isLo
 public protocol Generator {
     func generate(_ request: MessageRequest) throws -> [String: Any]
     func status(_ provider: String) -> ProviderStatus
+    /// Several providers' sign-in answers at once, as `/status` asks for them: one wait for all of them, not one each.
+    func statuses(_ providers: [String]) -> [String: ProviderStatus]
     func health(_ provider: String) -> ProviderHealth
     /// Health from the sign-in answer `/status` already has, so one poll checks each CLI once.
     func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth
@@ -14,6 +16,9 @@ public protocol Generator {
 }
 
 extension Generator {
+    public func statuses(_ providers: [String]) -> [String: ProviderStatus] {
+        Dictionary(uniqueKeysWithValues: providers.map { ($0, status($0)) })
+    }
     public func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth { health(provider) }
 }
 
@@ -85,7 +90,8 @@ public final class Router: @unchecked Sendable {
 
     private func statusResponse(for caller: StatusCaller) -> HTTPResponse {
         let trusted = caller != .anonymous
-        let signIns = ["claude": generator.status("claude"), "codex": generator.status("codex")]
+        // One wait for both providers: the app gives the whole poll two seconds.
+        let signIns = generator.statuses(["claude", "codex"])
         func entry(_ provider: String) -> [String: Any] {
             let s = signIns[provider]!
             // `ready` is what the app shows: false is "not signed in" with the sign-in command in every Iris app, so

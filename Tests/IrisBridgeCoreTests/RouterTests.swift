@@ -591,16 +591,65 @@ final class RouterTests: XCTestCase {
         XCTAssertEqual(runner.turns, 0, "no turn runs before a subscription sign-in is confirmed")
         try assertNotShownSignedOut("after the checks gave up")
     }
+
+    /// A sign-in check whose CLI traps SIGTERM and never answers, run for real. The message waits for it no longer
+    /// than the limit, and lets go of the helper: the next message is not refused as busy, and neither it nor a
+    /// model list waits on the stuck check again.
+    func testAMessageOnASignInCheckThatNeverEndsLetsGoOfTheHelperWithinTheLimit() throws {
+        let claude = try StubCLI.write("trap '' TERM\nsleep 30")
+        let service = ProviderService(runner: ForegroundProcessRunner(), executableLookup: { $0 == "claude" ? claude : nil })
+        service.signInRetryPause = 0
+        service.signInTimeouts = (first: 0.5, retry: 0.5)
+        service.signInWait = 1.5
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: ServiceGenerator(service), log: nil)
+        let couldNotCheck = "Couldn't check Claude's sign-in just now — the Mac may be busy. Try again in a moment."
+        let message = #"{"provider":"claude","message":"Hello"}"#
+        let started = Date()
+        let (status, body) = send("POST", "/message", body: message, auth: token)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 3, "the limit, not the CLI, decides how long the message waits")
+        XCTAssertEqual(status, 502)
+        XCTAssertEqual(body["cause"] as? String, "providerUnavailable")
+        XCTAssertEqual(body["error"] as? String, couldNotCheck)
+        let later = Date()
+        let (again, againBody) = send("POST", "/message", body: message, auth: token)
+        XCTAssertNotEqual(again, 409, "the first message let go of the helper")
+        XCTAssertEqual(againBody["cause"] as? String, "providerUnavailable")
+        let (models, list) = send("GET", "/models?provider=claude", auth: token)
+        XCTAssertEqual(models, 200)
+        XCTAssertEqual(list["notice"] as? String, couldNotCheck)
+        XCTAssertEqual((list["models"] as? [Any])?.count, 0)
+        XCTAssertLessThan(Date().timeIntervalSince(later), 1, "past its deadline the stuck check is not waited on again")
+    }
+
+    /// The app gives a `/status` poll two seconds. Both providers' checks share one wait instead of taking one each.
+    func testAStatusPollWaitsOnceForBothProviders() throws {
+        let runner = BusyMacRunner()
+        defer { runner.release() }
+        let service = ProviderService(runner: runner, executableLookup: { "/iris-test/\($0)" })
+        router = Router(fingerprint: fingerprint, hostName: "Studio Mac", adminToken: "admin-secret", devices: devices, pairing: pairing,
+                        inbox: inbox, context: context, generator: ServiceGenerator(service, wait: 0.5), log: nil)
+        let started = Date()
+        let (status, data) = raw("GET", "/status", auth: token)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.9, "one 0.5 s wait for both, not 0.5 s each")
+        XCTAssertEqual(status, 200)
+        let decoded = try JSONDecoder().decode(AppStatus.self, from: data)
+        XCTAssertEqual(decoded.providers["claude"]?.ready, true, "still running, and not shown as signed out")
+        XCTAssertEqual(decoded.providers["codex"]?.ready, true)
+        XCTAssertEqual(runner.checks, 2, "both checks run side by side")
+    }
 }
 
 /// `ProviderService` behind the router the way `LiveGenerator` puts it there, polls waiting briefly.
 private final class ServiceGenerator: Generator {
     let service: ProviderService
-    init(_ service: ProviderService) { self.service = service }
+    let wait: TimeInterval
+    init(_ service: ProviderService, wait: TimeInterval = 0.05) { self.service = service; self.wait = wait }
     func generate(_ request: MessageRequest) throws -> [String: Any] { try service.generate(request) }
-    func status(_ provider: String) -> ProviderStatus { service.status(provider, wait: 0.05) }
+    func status(_ provider: String) -> ProviderStatus { service.status(provider, wait: wait) }
+    func statuses(_ providers: [String]) -> [String: ProviderStatus] { service.statuses(providers, wait: wait) }
     func health(_ provider: String) -> ProviderHealth { service.health(provider) }
-    func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth { service.health(provider, signIn: signIn) }
+    func health(_ provider: String, signIn: ProviderStatus) -> ProviderHealth { service.health(provider, signIn: signIn, versionWait: 0) }
     func models(_ provider: String) -> ProviderModelCatalog { service.models(provider) }
     func cancel(_ id: String) {}
 }

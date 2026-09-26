@@ -16,7 +16,8 @@
 #  10. a v3 Claude turn calls an Iris tool (iris_list_posts, on a fictional snapshot this script pushes);
 #  11. a v3 approval round trip: Claude is asked to create a Google Calendar event, the approval reaches this
 #      script, which denies it, so nothing is created; skipped when Google Calendar is not connected in the
-#      Claude account or Claude's settings pre-allow any MCP tool (a pre-allowed tool never asks);
+#      Claude account, needs authorizing again there, or Claude's settings pre-allow any MCP tool (a pre-allowed
+#      tool never asks);
 #  12. the helper restarts and the thread's next turn resumes the same Claude conversation;
 #  13. turn.cancel stops a reply and the next turn still knows what was written;
 #  14. a v3 Codex turn calls an Iris tool and the next turn resumes, skipped like 6;
@@ -204,6 +205,10 @@ print(",".join(c["name"] for c in claude.get("connectors", []) if c.get("status"
     if [ "$(printf '%s' "$APPROVAL" | field end)" = turn.completed ] && printf '%s' "$APPROVAL" | field approvalKinds | grep -q 'connectorWrite' \
        && ! printf '%s' "$APPROVAL" | field toolsOk | grep -q 'create_event'; then
       pass "v3 approval round trip denies a connector write"
+    elif [ -z "$(printf '%s' "$APPROVAL" | field tools)" ] && printf '%s' "$APPROVAL" | field text | grep -qi 'needs to be authorized'; then
+      # The account lists Google Calendar, but Claude reports it needs authorizing again before any tool runs, so
+      # no write was attempted and there is nothing to approve: the same as not connected.
+      skip "v3 approval round trip: Google Calendar needs authorizing again in the Claude account"
     else fail "v3 approval round trip: $APPROVAL"; fi
   fi
 

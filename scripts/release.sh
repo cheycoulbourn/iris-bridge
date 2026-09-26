@@ -4,7 +4,7 @@
 # Runs in this order so that nothing outside this machine is mutated until every artifact exists and has
 # been verified:
 #
-#   preflight (tag/branch/tree/tooling) -> build -> sign -> notarize -> tarball -> git tag -> git push -> gh release create
+#   preflight (tag/branch/origin main/tree/version/changelog/test names/smoke/tooling) -> build -> sign -> notarize -> tarball -> git tag -> git push -> gh release create
 #
 # Recovery, by the point at which it failed:
 #
@@ -56,13 +56,46 @@ if [ -n "$REMOTE_TAG" ]; then
     exit 1
 fi
 
-[ "$(git rev-parse --abbrev-ref HEAD)" = main ] || { echo "Release from main."; exit 1; }
+# main, because the tag and `git push origin main` below publish main, and install.sh is served from raw main:
+# a release that lives only on its own branch would ship a binary next to the previous release's installer.
+BRANCH=$(git rev-parse --abbrev-ref HEAD)
+[ "$BRANCH" = main ] || {
+    echo "Release from main. Merge $BRANCH into main first (on main: git merge --ff-only $BRANCH), then run this there."
+    exit 1
+}
+
+# `git push origin main` runs only after the notarized build is tagged; a main that is missing origin's commits
+# would be rejected there, with the tag already made. Same fail-closed rule as the tag check above.
+if ! REMOTE_MAIN=$(git ls-remote origin refs/heads/main); then
+    echo "Cannot reach origin to check its main. Fix the network or the remote, then try again."
+    exit 1
+fi
+REMOTE_MAIN=$(printf '%s' "$REMOTE_MAIN" | awk '{print $1}')
+if [ -n "$REMOTE_MAIN" ] && ! git merge-base --is-ancestor "$REMOTE_MAIN" HEAD 2>/dev/null; then
+    echo "origin/main has commits this main does not. Run git pull --ff-only origin main (or merge it), then try again."
+    exit 1
+fi
 
 # A dirty tree means the tag would not describe what was built. Untracked files count: a source file nobody
 # committed still compiles into the binary this tag names.
 [ -z "$(git status --porcelain)" ] || { echo "Commit or stash your changes first (untracked files count; see git status)."; exit 1; }
 
 grep -qF "current = \"$VERSION\"" Sources/IrisBridgeCore/Version.swift || { echo "Set BridgeVersion.current to $VERSION first."; exit 1; }
+
+# Merging a release branch into main is where these go wrong: a conflicted CHANGELOG.md resolved to one side
+# loses an entry, and a test file the release branch moved comes back at its old path from main.
+grep -qx "## $VERSION" CHANGELOG.md || { echo "CHANGELOG.md has no \"## $VERSION\" entry. Add it (or restore it after a merge) first."; exit 1; }
+# SwiftPM refuses a target that uses a file name twice. The release build below never builds the tests, so it
+# would not notice; this main would then fail `swift test` for everyone after it.
+DUPLICATE_TESTS=$(git ls-files -- 'Tests/IrisBridgeCoreTests/*.swift' | sed 's|.*/||' | sort | uniq -d)
+[ -z "$DUPLICATE_TESTS" ] || {
+    echo "Two test files share a name, so swift test cannot build Tests/IrisBridgeCoreTests. A merge brings a file"
+    echo "the release branch moved back at its old path; git rm the stale copy:"
+    printf '%s\n' "$DUPLICATE_TESTS" | while IFS= read -r name; do
+        git ls-files -- 'Tests/IrisBridgeCoreTests/*.swift' | awk -v n="/$name" 'substr($0, length($0) - length(n) + 1) == n { print "    " $0 }'
+    done
+    exit 1
+}
 
 # E4: 0.2.0 and 0.2.2 shipped broken because nothing ran them against a real Claude Code or Codex first.
 # scripts/smoke.sh records the code it checked (Package.swift and Sources) after a clean run with at least one

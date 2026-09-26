@@ -123,8 +123,17 @@ Every release is checked against the real Claude Code and Codex before it ships:
     sh Tests/integration.sh
     sh Tests/install-test.sh
     sh Tests/smoke-test.sh      # the smoke script itself, against the stub CLIs
+    sh Tests/release-test.sh    # release.sh's preflight refusals, on scratch repositories
     sh scripts/smoke.sh         # live: a second helper on a random port, v2 turns and a v3 session per provider
     scripts/release.sh <version>
+
+Releases are made from `main`: `scripts/release.sh` tags and pushes `main`, and the install command serves
+`install.sh` from `main`. Work on a release branch reaches `main` by fast-forward. Merge `main` into the branch
+first, keep every CHANGELOG entry, and `git rm` any test file the merge brings back at a path the branch moved
+it from. Then on `main` run `git merge --ff-only release/<version>`. A smoke run records Package.swift and
+Sources, so it stays valid across that merge when the merge leaves them as the branch had them.
+`scripts/release.sh` refuses to start off `main`, on a `main` missing commits from `origin/main`, without a
+`## <version>` CHANGELOG entry, or with two test files of the same name, before it builds or tags anything.
 
 `scripts/smoke.sh` never touches the installed helper on port 48731. It skips a provider that is not
 installed, is signed out or is at its usage limit. Its v3 session makes one Iris tool call, one approval round

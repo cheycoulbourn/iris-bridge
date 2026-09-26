@@ -1,5 +1,5 @@
 public enum BridgeVersion {
-    public static let current = "0.2.5"
+    public static let current = "0.3.0"
     public static let protocolVersion = 2
     /// What this helper can do, by name (contract §3). The app enables a feature when its name is listed, and
     /// compares versions only for helpers that send no list (0.2.4 and older). The first four name the app's

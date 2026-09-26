@@ -26,7 +26,11 @@ public protocol ProviderProcess: AnyObject {
 /// Starts provider CLIs. `SystemProcessLauncher` is the real one; tests replay recorded output instead.
 public protocol ProcessLauncher: AnyObject {
     /// `line` gets each stdout line in order; `exit` gets the exit status and the last 2,000 characters of
-    /// stderr, exactly once, after the last line.
+    /// stderr, exactly once, once the process itself has exited and its pipes have had
+    /// `SystemProviderProcess.drainGrace` to reach end of file. Something the process started can keep either
+    /// pipe's write end open long after the process itself is gone (a detached child, say), which could hold it
+    /// open for as long as it likes; `exit` does not wait on that past the bound, though `line` still delivers
+    /// whatever a reader still going reads later.
     func launch(_ command: ProviderCommand, line: @escaping (Data) -> Void,
                 exit: @escaping (Int32, String) -> Void) throws -> ProviderProcess
 }
@@ -42,13 +46,21 @@ public final class SystemProcessLauncher: ProcessLauncher {
     }
 }
 
-/// A child process with a reader thread per pipe: stdout lines are delivered in order and all of them before
-/// `exit`, which a readability handler cannot promise.
+/// A child process with a reader thread per pipe: stdout lines are delivered in order as they arrive, and
+/// `exit` is reported once the process itself has exited and its readers have had `drainGrace` to catch up,
+/// not once they reach end of file — a reader waits on end of file, which something the process started (a
+/// detached child that inherited the pipe, say) can hold open long after the process itself is gone, and
+/// `exit` must not hang the caller waiting for that (the same tradeoff 0.2.6 gave `PipeReader` on the v2 path).
 final class SystemProviderProcess: ProviderProcess, @unchecked Sendable {
     private let process = Process()
     private let stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
     private let lock = NSLock()
     private var inputOpen = true
+
+    /// How long `exit` waits for the stdout/stderr readers once the process itself has exited. Everything it
+    /// wrote is in the pipes by then, so a reader needs a moment at most; the same bound `ForegroundProcessRunner`
+    /// gives `PipeReader` on the v2 path.
+    static let drainGrace: TimeInterval = 2
 
     func start(_ command: ProviderCommand, line: @escaping (Data) -> Void, exit: @escaping (Int32, String) -> Void) throws {
         process.executableURL = URL(fileURLWithPath: command.arguments[0])
@@ -59,37 +71,59 @@ final class SystemProviderProcess: ProviderProcess, @unchecked Sendable {
         _ = fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         try process.run()
         let group = DispatchGroup()
+        let tailLock = NSLock()
         var tail = Data()
         group.enter()
         Thread.detachNewThread { [stdout] in
-            var buffer = Data()
+            // Raw `read()` on the descriptor, incrementally and in a fixed-size buffer, not
+            // `FileHandle.availableData`: a read end closed under a blocked `FileHandle` read raises an
+            // Objective-C exception Swift cannot catch, which would take the helper down (`PipeReader`'s own
+            // reasoning, on the pipe a long chat session's reply streams over).
+            let descriptor = stdout.fileHandleForReading.fileDescriptor
+            var readBuffer = [UInt8](repeating: 0, count: 65_536)
+            var lineBuffer = Data()
             while true {
-                let chunk = stdout.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                buffer.append(chunk)
-                while let newline = buffer.firstIndex(of: 0x0A) {
-                    let lineData = buffer.subdata(in: buffer.startIndex..<newline)
-                    buffer.removeSubrange(buffer.startIndex...newline)
-                    if !lineData.isEmpty { line(lineData) }
+                let count = read(descriptor, &readBuffer, readBuffer.count)
+                if count > 0 {
+                    lineBuffer.append(readBuffer, count: count)
+                    while let newline = lineBuffer.firstIndex(of: 0x0A) {
+                        let lineData = lineBuffer.subdata(in: lineBuffer.startIndex..<newline)
+                        lineBuffer.removeSubrange(lineBuffer.startIndex...newline)
+                        if !lineData.isEmpty { line(lineData) }
+                    }
+                    continue
                 }
+                if count < 0 && errno == EINTR { continue }
+                break
             }
-            if !buffer.isEmpty { line(buffer) }
+            if !lineBuffer.isEmpty { line(lineBuffer) }
             group.leave()
         }
         group.enter()
         Thread.detachNewThread { [stderr] in
+            let descriptor = stderr.fileHandleForReading.fileDescriptor
+            var readBuffer = [UInt8](repeating: 0, count: 65_536)
             while true {
-                let chunk = stderr.fileHandleForReading.availableData
-                if chunk.isEmpty { break }
-                tail.append(chunk)
-                if tail.count > 16_384 { tail = tail.suffix(8_192) }
+                let count = read(descriptor, &readBuffer, readBuffer.count)
+                if count > 0 {
+                    tailLock.lock()
+                    tail.append(readBuffer, count: count)
+                    if tail.count > 16_384 { tail = tail.suffix(8_192) }
+                    tailLock.unlock()
+                    continue
+                }
+                if count < 0 && errno == EINTR { continue }
+                break
             }
             group.leave()
         }
         Thread.detachNewThread { [process] in
             process.waitUntilExit()
-            group.wait()
-            exit(process.terminationStatus, ProviderOutput.tail(String(decoding: tail, as: UTF8.self)))
+            // Bounded, not forever: past this, whichever reader has not reached end of file is waiting on
+            // something the process left running with the pipe open, which is not this call's to wait for.
+            _ = group.wait(timeout: .now() + Self.drainGrace)
+            tailLock.lock(); let tailSnapshot = tail; tailLock.unlock()
+            exit(process.terminationStatus, ProviderOutput.tail(String(decoding: tailSnapshot, as: UTF8.self)))
         }
         if let input = command.input {
             try? stdin.fileHandleForWriting.write(contentsOf: input)

@@ -36,6 +36,18 @@ final class SystemProcessLauncherTests: XCTestCase {
         XCTAssertEqual(echoed.lines, ["got hello"])
     }
 
+    /// A long-running v3 chat session's CLI can exit while something it started (an MCP server it spawned and
+    /// left behind, say) keeps holding the write end of stdout open. `exit` must still be reported, bounded by
+    /// `SystemProviderProcess.drainGrace`, not withheld until that leftover process's own pipe reaches end of
+    /// file — which, before this fix, blocked `group.wait()` forever and never called `exit` at all.
+    func testExitIsReportedEvenWhenSomethingTheProcessStartedKeepsItsPipeOpen() throws {
+        let start = Date()
+        let result = try run("(sleep 5 &) ; echo done")
+        XCTAssertEqual(result.lines, ["done"])
+        XCTAssertEqual(result.status, 0)
+        XCTAssertLessThan(Date().timeIntervalSince(start), SystemProviderProcess.drainGrace + 3)
+    }
+
     func testTerminateStopsTheWholeProcessGroup() throws {
         let result = try run("sleep 30 & wait") { process in
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) { process.terminate() }

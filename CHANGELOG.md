@@ -2,10 +2,28 @@
 
 ## 0.3.0
 
-Run the install command again to pick this up. Pairs with Iris build 142; older Iris apps keep working
-unchanged, on the same `/status`, `/message`, `/cancel`, `/inbox` and `/context` endpoints 0.2.5 served, with
-the same port, certificate and pairing. A build without the new chat never opens `/v3/stream` and never sees
-it advertised; nothing about the v2 shape it already reads has changed.
+Run the install command again to pick this up. Pairs with Iris build 142, the first with the new chat. The
+port, certificate and pairing are the same, so no device re-pairs.
+
+What an Iris build without the new chat (builds 139 to 141, and older) gets from 0.3.0:
+
+- Unchanged: chat on `/message` and `/cancel`, the model list on `/models`, `/status` (protocol `version: 2`
+  and the same fields), listing and deciding what Iris Bridge 0.2 already collected in the Inbox (`/inbox` and
+  `/inbox/<id>/decision`), and `PUT /context`, which the new read tools still fall back to while no build with
+  the new chat has sent this Mac its workspace.
+- `/status` for a paired device now also lists `v3` and `effort` in `capabilities`. These builds ignore names
+  they do not know and still check `version: 2`, so nothing they show changes.
+- New agent work no longer reaches them. The 0.2 agent tools are replaced by the v3 Iris tools the README
+  lists: `iris_submit_post`, `iris_submit_series`, `iris_propose_archive_posts`, `iris_revise_submission`,
+  `iris_list_submissions` and `iris_get_workspace_context` are gone, and so are `POST /admin/inbox` and
+  `GET /admin/context`, the routes they saved and read through. A change made with the v3 tools is queued on
+  this Mac for a device that says hello on `/v3/stream`, which only a build with the new chat does, and one
+  still waiting after a week is dropped. A build without the new chat never sees it in its Inbox, even while
+  it is open.
+- A Claude Code or Codex session that was already open keeps the 0.2 tools, and they fail until the session is
+  restarted, because this helper no longer serves their routes. A new session gets the v3 tools.
+
+What 0.3.0 adds:
 
 - Iris chat: an Iris app with the new chat holds one secure connection open to this Mac
   (`wss://<this Mac>:48731/v3/stream`) while it is in the foreground. Each thread gets its own Claude Code or
@@ -17,8 +35,10 @@ it advertised; nothing about the v2 shape it already reads has changed.
   with `@` or the chosen `/` command allows it, and anything that would send, create or change something
   outside Iris asks the owner first in the app; no answer within ten minutes reads as no. It cannot read or
   change files on this Mac, run commands or browse the web. Codex gets the Iris tools but no connectors.
-- A Claude Code setting that already pre-allows a connector tool (`permissions.allow` in
-  `~/.claude/settings.json`) is read once at hello and never asks; Iris's Settings shows any such rule.
+- A connector tool that a Claude Code setting already pre-allows (`permissions.allow` in
+  `~/.claude/settings.json`) never asks; Iris's Settings shows any such rule. The helper reads that file again
+  every time it builds its health report, at each hello and at each check (once a minute), so a rule added or
+  removed shows up within a minute without restarting anything.
 - `thread.send` can carry a reasoning-effort choice (`low`, `medium`, `high`, `xhigh`, `max`; omitted is
   Automatic, the provider's own default), offered in the app's composer only when this helper reports the
   `effort` capability. Claude receives it as `--effort`; Codex receives it as `model_reasoning_effort`, with

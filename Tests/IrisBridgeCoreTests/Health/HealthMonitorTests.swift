@@ -227,6 +227,30 @@ final class HealthMonitorTests: XCTestCase {
         XCTAssertEqual(monitor.preAllowedTools(), ["mcp__claude_ai_Gmail__send_message", "mcp__iris__iris_list_posts"])
         XCTAssertEqual(monitor.report()["claude"]?["preAllowedTools"]?.arrayValue?.count, 2)
     }
+
+    /// CHANGELOG 0.3.0: the settings file is read again for every report, not once at hello, so a rule the owner
+    /// adds or removes later reaches the next hello at once and every connected app at the next check.
+    func testPreAllowedToolsAreReadAgainForEveryReportAndSentAtTheNextCheck() throws {
+        let gmail = "mcp__claude_ai_Gmail__send_message", calendar = "mcp__claude_ai_Google_Calendar__create_event"
+        try Data(#"{"permissions":{"allow":["\#(gmail)"]}}"#.utf8).write(to: settings)
+        settle()
+        XCTAssertEqual(monitor.report()["claude"]?["preAllowedTools"], [.string(gmail)])
+
+        try Data(#"{"permissions":{"allow":["\#(gmail)","\#(calendar)"]}}"#.utf8).write(to: settings)
+        XCTAssertEqual(monitor.report()["claude"]?["preAllowedTools"], [.string(gmail), .string(calendar)], "the next hello sees the new rule")
+        monitor.refresh()
+        let sent = expectation(description: "health.changed carries the new rule")
+        DispatchQueue.global().async {
+            while !self.outbox.broadcasts.contains(where: {
+                $0["type"] == "health.changed" && $0["health"]?["claude"]?["preAllowedTools"]?.arrayValue?.count == 2
+            }) { Thread.sleep(forTimeInterval: 0.01) }
+            sent.fulfill()
+        }
+        wait(for: [sent], timeout: 5)
+
+        try FileManager.default.removeItem(at: settings)
+        XCTAssertEqual(monitor.report()["claude"]?["preAllowedTools"], [], "a removed rule is gone from the next report")
+    }
 }
 
 /// The clock `ProviderService` keeps its sign-in answers by. Read from the monitor's queue, so it is locked.

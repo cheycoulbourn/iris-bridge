@@ -36,14 +36,18 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
     }
     let context = ContextStore(file: paths.context)
     let generator = LiveGenerator()
-    let router = Router(fingerprint: identity.fingerprint, hostName: HostName.computerName(), adminToken: adminToken, devices: devices, pairing: pairing,
-                        inbox: inbox, context: context, generator: generator, log: log)
-    let server = try BridgeServer(port: port, identity: identity, router: router, serviceName: HostName.computerName(), advertise: bonjour, log: log)
+    let runtime = BridgeRuntime(paths: paths, port: port, fingerprint: identity.fingerprint, hostName: HostName.computerName(),
+                                adminToken: adminToken, devices: devices, pairing: pairing, inbox: inbox, context: context, log: log,
+                                helperBinary: Bundle.main.executablePath ?? CommandLine.arguments[0],
+                                generator: generator, providers: generator.providers)
+    let server = try BridgeServer(port: port, identity: identity, router: runtime.router, serviceName: HostName.computerName(),
+                                  advertise: bonjour, log: log, streams: runtime.hub)
     signal(SIGPIPE, SIG_IGN)
     try server.start()
-    // A cold `claude auth status` can outlast the app's first poll, so both checks start now, behind the listener,
-    // and that poll finds a finished answer.
+    // A cold `claude auth status` can outlast the app's first poll, so both checks start now, side by side and
+    // behind the listener; the health monitor's first round, which checks one provider after the other, joins them.
     generator.startSignInChecks()
+    runtime.start()
     print("Iris Bridge \(BridgeVersion.current) is running on port \(server.actualPort ?? port).")
     if devices.all.isEmpty {
         // Under launchd, stdout is a log file: a code printed here would sit on disk for anyone who can read
@@ -117,7 +121,9 @@ do {
         } else {
             let waiting = try client.listSubmissions(status: "pending")
             if waiting.isEmpty {
-                print("Nothing is waiting. Your agent has not sent anything yet.")
+                // 0.3.0 sends agents' changes to the Iris app itself (its Inbox and Activity); this list only
+                // holds what Iris Bridge 0.2 collected.
+                print("Nothing from Iris Bridge 0.2 is waiting. Changes from your agents now appear in Iris itself.")
             }
             let now = Date()
             for submission in waiting {
@@ -132,7 +138,9 @@ do {
         // the other end of that pipe, a client that closes it early must end this process at EOF rather than
         // kill it with SIGPIPE part-way through a reply.
         MCPServer.ignoreBrokenPipe()
-        let server = MCPServer(client: LoopbackAdminClient(paths: paths, port: port), version: BridgeVersion.current)
+        let thread = line.options["--thread"]
+        if let thread, !StreamIdentifiers.isThreadID(thread) { refuse("--thread must be a chat thread id.") }
+        let server = MCPServer(client: LoopbackToolClient(paths: paths, port: port), version: BridgeVersion.current, threadId: thread)
         try server.run(transport: StdioMCPTransport())
     case "install-agent":
         guard let typed = line.options["--binary"] else { refuse("Usage: iris-bridge install-agent --binary <path>") }

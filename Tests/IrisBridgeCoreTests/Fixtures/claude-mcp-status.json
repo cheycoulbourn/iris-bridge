@@ -1,0 +1,16 @@
+{"mcpServers": [
+  {"name": "plugin:example:tracker", "status": "needs-auth", "config": {"type": "http", "url": "https://example.com/mcp"}, "scope": "dynamic", "source": "plugin"},
+  {"name": "localtools", "status": "connected", "serverInfo": {"name": "localtools", "version": "1.0.0"}, "config": {"type": "stdio", "command": "/usr/local/bin/localtools", "args": []}, "scope": "user", "source": "user",
+   "tools": [{"name": "run_anything", "annotations": {}}]},
+  {"name": "iris", "status": "connected", "serverInfo": {"name": "iris-bridge", "version": "0.3.0"}, "config": {"type": "stdio", "command": "/Users/example/Library/Application Support/Iris Bridge/bin/iris-bridge", "args": ["mcp", "--thread", "8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77"]}, "scope": "dynamic", "source": "dynamic",
+   "tools": [{"name": "iris_list_posts", "annotations": {"readOnly": true}}, {"name": "iris_create_task", "annotations": {}}, {"name": "approval", "annotations": {}}]},
+  {"name": "claude.ai Gmail", "status": "connected", "serverInfo": {"name": "gmail", "version": "1"}, "config": {"type": "claudeai-proxy", "url": "https://example.com/gmail", "id": "srv_gmail"}, "scope": "claudeai", "source": "claudeai",
+   "tools": [{"name": "search_threads", "annotations": {"readOnly": true}}, {"name": "get_thread", "annotations": {}}, {"name": "create_draft", "annotations": {}},
+             {"name": "send_message", "annotations": {"openWorld": true}}, {"name": "trash_thread", "annotations": {"destructive": true}}]},
+  {"name": "claude.ai Google Calendar", "status": "connected", "serverInfo": {"name": "gcal", "version": "1"}, "config": {"type": "claudeai-proxy", "url": "https://example.com/gcal", "id": "srv_gcal"}, "scope": "claudeai", "source": "claudeai",
+   "tools": [{"name": "list_events", "annotations": {"readOnly": true}}, {"name": "list_calendars", "annotations": {"readOnly": true}},
+             {"name": "create_event", "annotations": {}}, {"name": "delete_event", "annotations": {"destructive": true}},
+             {"name": "suggest_time", "annotations": {"readOnly": true}}, {"name": "createEventFromTemplate", "annotations": {"readOnly": true}},
+             {"name": "fetch_and_clear_reminders", "annotations": {"destructive": true}}]},
+  {"name": "claude.ai Notion", "status": "needs-auth", "config": {"type": "claudeai-proxy", "url": "https://example.com/notion", "id": "srv_notion"}, "scope": "claudeai", "source": "claudeai"}
+]}

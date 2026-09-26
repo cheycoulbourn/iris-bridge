@@ -1,6 +1,48 @@
-#!/bin/sh
-if [ "$1" = "login" ]; then echo "Logged in using ChatGPT" >&2; exit 0; fi
-if [ "$1" = "--version" ]; then echo "codex-cli 0.0.0-stub"; exit 0; fi
-cat >/dev/null
-echo '{"type":"item.completed","item":{"type":"agent_message","text":"{\"reply\":\"Codex stub.\",\"proposal\":null}"}}'
-echo '{"type":"turn.completed"}'
+#!/usr/bin/env python3
+"""Stands in for Codex. v2 chat: one structured reply. v3 chat: `codex exec --json` and `codex exec resume`,
+calling iris_list_posts through the Iris MCP server a run was given when the prompt names it, and
+remembering each thread's previous prompt so a resumed run can say what it was."""
+import json, os, sys, uuid
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+args = sys.argv[1:]
+if args[:1] == ["login"]:
+    print("Logged in using ChatGPT", file=sys.stderr); sys.exit(0)
+if args[:1] == ["--version"]:
+    print("codex-cli 0.0.0-stub"); sys.exit(0)
+prompt = sys.stdin.read()
+if "--output-schema" in args:
+    print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": json.dumps({"reply": "Codex stub.", "proposal": None})}}))
+    print(json.dumps({"type": "turn.completed"}))
+    sys.exit(0)
+
+from stub_mcp_client import MCP
+
+def emit(event):
+    print(json.dumps(event), flush=True)
+
+config = {}
+for index, arg in enumerate(args):
+    if arg == "-c" and args[index + 1].startswith("mcp_servers.iris."):
+        key, raw = args[index + 1][len("mcp_servers.iris."):].split("=", 1)
+        config[key] = json.loads(raw)
+thread = args[args.index("resume") + 1] if "resume" in args else str(uuid.uuid4())
+memory = os.path.join(os.environ.get("TMPDIR", "/tmp"), "stub-codex-" + thread)
+emit({"type": "thread.started", "thread_id": thread})
+emit({"type": "turn.started"})
+if "iris_list_posts" in prompt:
+    iris = MCP(config["command"], config["args"])
+    emit({"type": "item.started", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "iris", "tool": "iris_list_posts", "status": "in_progress"}})
+    text, failed = iris.call("iris_list_posts", {})
+    iris.close()
+    emit({"type": "item.completed", "item": {"id": "item_1", "type": "mcp_tool_call", "server": "iris", "tool": "iris_list_posts",
+                                             "status": "failed" if failed else "completed", "result": {"content": [{"type": "text", "text": text}]}}})
+    reply = "Listed the posts."
+elif "previous message" in prompt:
+    reply = open(memory).read()[-60:] if os.path.exists(memory) else "I do not know"
+else:
+    reply = "Codex stub."
+with open(memory, "w") as handle:
+    handle.write(prompt)
+emit({"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": reply}})
+emit({"type": "turn.completed", "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}})

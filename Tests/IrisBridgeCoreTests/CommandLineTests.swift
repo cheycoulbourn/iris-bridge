@@ -2,6 +2,14 @@ import XCTest
 @testable import IrisBridgeCore
 
 final class CommandLineTests: XCTestCase {
+    /// A chat session's MCP server is told its thread; the id is a value, never a positional.
+    func testMCPTakesAThread() throws {
+        let line = try BridgeCommandLine.parse(["mcp", "--thread", "8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77", "--root", "/tmp/x"])
+        XCTAssertEqual(line.options["--thread"], "8B2F4C1E-7A0D-4E55-9C3B-2F1D0E6A9B77")
+        XCTAssertTrue(line.positionals.isEmpty)
+        XCTAssertThrowsError(try BridgeCommandLine.parse(["mcp", "--thread"]))
+    }
+
     func testDefaultsToServeWhenNothingIsTyped() throws {
         let line = try BridgeCommandLine.parse([])
         XCTAssertEqual(line.command, "serve")

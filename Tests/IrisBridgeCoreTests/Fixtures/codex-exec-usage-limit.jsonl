@@ -1,0 +1,6 @@
+{"dir":"in","obj":{"type":"stdin"}}
+{"dir":"out","obj":{"type":"thread.started","thread_id":"01a0cc92-2af6-7f71-a669-a1502d6c499a"}}
+{"dir":"out","obj":{"type":"turn.started"}}
+{"dir":"out","obj":{"type":"error","message":"You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 26th, 2026 8:41 AM."}}
+{"dir":"out","obj":{"type":"turn.failed","error":{"message":"You’ve hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 26th, 2026 8:41 AM."}}}
+{"dir":"exit","status":1,"stderr":""}

@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.3.0
+
+Run the install command again to pick this up. Pairs with Iris build 142; older Iris apps keep working
+unchanged, on the same `/status`, `/message`, `/cancel`, `/inbox` and `/context` endpoints 0.2.5 served, with
+the same port, certificate and pairing. A build without the new chat never opens `/v3/stream` and never sees
+it advertised; nothing about the v2 shape it already reads has changed.
+
+- Iris chat: an Iris app with the new chat holds one secure connection open to this Mac
+  (`wss://<this Mac>:48731/v3/stream`) while it is in the foreground. Each thread gets its own Claude Code or
+  Codex session here, started when the thread is opened and picked up again later, so replies stream as they
+  are written and the conversation is remembered; up to three chats can answer at once, a reply keeps going if
+  the phone locks, and the app catches up when it reconnects.
+- In chat, Claude can use the Iris tools and the connectors in the owner's Claude account (Gmail, Google
+  Calendar, Notion and the rest connected at claude.ai). It reads a connector only when the message mentions it
+  with `@` or the chosen `/` command allows it, and anything that would send, create or change something
+  outside Iris asks the owner first in the app; no answer within ten minutes reads as no. It cannot read or
+  change files on this Mac, run commands or browse the web. Codex gets the Iris tools but no connectors.
+- A Claude Code setting that already pre-allows a connector tool (`permissions.allow` in
+  `~/.claude/settings.json`) is read once at hello and never asks; Iris's Settings shows any such rule.
+- `thread.send` can carry a reasoning-effort choice (`low`, `medium`, `high`, `xhigh`, `max`; omitted is
+  Automatic, the provider's own default), offered in the app's composer only when this helper reports the
+  `effort` capability. Claude receives it as `--effort`; Codex receives it as `model_reasoning_effort`, with
+  `xhigh` and `max` folded into Codex's own highest documented level. Changing it mid-reply takes effect after
+  that turn: the session restarts with `--resume` so nothing already written is lost.
+- Every 0.2.6 fix, carried on both the v2 `/message` path and the new v3 sessions: a busy Mac answering
+  `claude auth status` slowly is no longer read as signed out (20 seconds and one retry, not 0.2.5's 8); a
+  message is tried when the sign-in check itself could not finish, provided an earlier check since the helper
+  started found a subscription sign-in, and refused as `providerUnavailable` (not `signedOut`) when none has;
+  a check that could not finish is never kept, and `/status` never shows a Mac it could not check as signed
+  out; both providers' sign-in checks (and CLI versions) start as the helper itself starts, so the first poll
+  after an install, a login or a restart already has an answer instead of waiting on a cold check.
+- The v3 provider runner no longer waits forever for its process's stdout and stderr to reach end of file once
+  the process itself has exited: something a long chat session started can leave either pipe's write end open
+  long after the CLI is gone, which used to stall that session's `exit` report indefinitely (piling up the
+  reader threads it never released, and the turn or session it never reported the end of) the same way a
+  blocking `readDataToEndOfFile()` could hang the v2 path before 0.2.6's `PipeReader`. It now reads both pipes
+  incrementally on their own threads, exactly as before, but waits for them only up to the same 2-second grace
+  0.2.6 gave the v2 runner once the process has exited, then reports `exit` regardless; a reader still going
+  past that point keeps delivering whatever it later reads, it just no longer holds up the report that the
+  process ended. The read loop itself also moved off `FileHandle.availableData` onto the same raw, fixed-size
+  `read()` `PipeReader` uses, so a pipe closed out from under a blocked read cannot raise the uncatchable
+  Objective-C exception `FileHandle` risks and take the helper down with it.
+
 ## 0.2.6
 
 Run the install command again to pick this up. Older Iris apps keep working unchanged.

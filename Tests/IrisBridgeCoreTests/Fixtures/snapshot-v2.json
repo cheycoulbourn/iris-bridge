@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 2,
+  "capturedAt": "2026-10-05T14:00:00Z",
+  "timeZone": "America/New_York",
+  "creatorName": "Robin Vale",
+  "creatorContext": "Speaks plainly. No exclamation marks.",
+  "profiles": [
+    {"id": "A1B2C3D4-0000-4000-8000-000000000001", "name": "Robin Vale", "handle": "@robinvale", "active": true},
+    {"id": "A1B2C3D4-0000-4000-8000-000000000002", "name": "Vale Studio", "handle": "@valestudio", "active": false}
+  ],
+  "pillars": [
+    {"id": "B0000000-0000-4000-8000-000000000001", "name": "Slow mornings", "detail": "Small rituals that start the day.", "isAnchor": true, "weekdays": [2, 4, 6]},
+    {"id": "B0000000-0000-4000-8000-000000000002", "name": "Studio notes", "detail": "How the work gets made.", "isAnchor": false, "weekdays": [3]},
+    {"id": "B0000000-0000-4000-8000-000000000003", "name": "Field trips", "detail": "", "isAnchor": false, "weekdays": []}
+  ],
+  "platforms": [
+    {"name": "Instagram", "formats": ["Reel", "Carousel"], "weeklyGoal": 3},
+    {"name": "TikTok", "formats": ["Video"], "weeklyGoal": 2}
+  ],
+  "posts": [
+    {"id": "C0000000-0000-4000-8000-000000000001", "revision": "r-p1", "title": "The kettle before the phone", "stage": "scripting",
+     "pillar": "Slow mornings", "platform": "Instagram", "format": "Reel", "date": "2026-10-06", "archived": false,
+     "hook": "I stopped checking my phone first thing.", "script": "", "caption": "", "cta": "", "notes": "",
+     "scenes": [{"id": "D0000000-0000-4000-8000-000000000001", "script": "Kettle on.", "shotNotes": "Top-down, steam."}]},
+    {"id": "C0000000-0000-4000-8000-000000000002", "revision": "r-p2", "title": "Glazing day", "stage": "editing",
+     "pillar": "Studio notes", "platform": "TikTok", "format": "Video", "date": "2026-10-07", "time": "18:30", "archived": false,
+     "hook": "", "script": "Three glazes, one kiln.", "caption": "", "cta": "Follow for the reveal", "notes": "", "scenes": []},
+    {"id": "C0000000-0000-4000-8000-000000000003", "revision": "r-p3", "title": "Glazing day", "stage": "drafted",
+     "pillar": "Studio notes", "platform": "TikTok", "format": "Video", "date": "2026-10-20", "archived": false,
+     "hook": "", "script": "", "caption": "", "cta": "", "notes": "Possible duplicate", "scenes": []},
+    {"id": "C0000000-0000-4000-8000-000000000004", "revision": "r-p4", "title": "Morning light, episode 1", "stage": "scheduled",
+     "pillar": "Slow mornings", "platform": "Instagram", "format": "Carousel", "date": "2026-10-08", "archived": false,
+     "seriesID": "E0000000-0000-4000-8000-000000000001", "episode": 1,
+     "hook": "", "script": "", "caption": "Light through the east window.", "cta": "", "notes": "", "scenes": []},
+    {"id": "C0000000-0000-4000-8000-000000000005", "revision": "r-p5", "title": "Old market walk", "stage": "published",
+     "pillar": "Field trips", "platform": "Instagram", "format": "Reel", "date": "2026-09-20", "archived": true,
+     "hook": "", "script": "", "caption": "", "cta": "", "notes": "", "scenes": [], "liveURL": "https://example.com/p/old-market"}
+  ],
+  "tasks": [
+    {"id": "F0000000-0000-4000-8000-000000000001", "revision": "r-t1", "title": "Buy oat milk for the shoot", "notes": "",
+     "dueDate": "2026-10-06", "done": false, "postID": "C0000000-0000-4000-8000-000000000001",
+     "subtasks": [{"title": "Check the corner shop", "done": true}], "archived": false},
+    {"id": "F0000000-0000-4000-8000-000000000002", "revision": "r-t2", "title": "Charge the camera", "notes": "Both batteries",
+     "dueDate": "2026-10-07", "dueTime": "09:00", "done": true, "subtasks": [], "archived": false},
+    {"id": "F0000000-0000-4000-8000-000000000003", "revision": "r-t3", "title": "Send the kiln invoice", "notes": "",
+     "done": false, "subtasks": [], "archived": false}
+  ],
+  "ideas": [
+    {"id": "A0000000-0000-4000-8000-000000000001", "revision": "r-i1", "title": "A week of breakfasts", "note": "One bowl a day.", "pillar": "Slow mornings", "archived": false},
+    {"id": "A0000000-0000-4000-8000-000000000002", "revision": "r-i2", "title": "Kiln cam", "note": "", "archived": false}
+  ],
+  "series": [
+    {"id": "E0000000-0000-4000-8000-000000000001", "revision": "r-s1", "name": "Morning light", "pillar": "Slow mornings",
+     "summary": "Five mornings, five windows.", "archived": false,
+     "episodes": [{"number": 1, "date": "2026-10-08", "postID": "C0000000-0000-4000-8000-000000000004"},
+                  {"number": 2, "date": "2026-10-15"}, {"number": 3, "date": "2026-10-22"}]}
+  ],
+  "focusThemes": [{"title": "Film", "weekdays": [2, 5]}, {"title": "Admin", "weekdays": [3]}],
+  "reviewItems": [
+    {"id": "item_0001", "title": "Glazing day", "reason": "Setting a posting date needs your approval.", "status": "pending", "source": "Claude", "createdAt": "2026-10-05T13:00:00Z"},
+    {"id": "item_0002", "title": "Morning light", "reason": "A new series needs your approval.", "status": "changesRequested", "source": "Claude", "comment": "Make it three episodes.", "createdAt": "2026-10-04T10:00:00Z"}
+  ],
+  "futureKeyThisHelperIgnores": {"anything": [1, 2, 3]}
+}

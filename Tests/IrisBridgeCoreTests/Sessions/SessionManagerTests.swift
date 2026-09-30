@@ -93,6 +93,30 @@ final class SessionManagerTests: XCTestCase {
         XCTAssertEqual(manager.replay(threadId: a, after: 1).map { $0["type"] }, ["text.delta", "turn.completed"])
     }
 
+    func testPostReferencesAreIDOnlyReplayableAndDeduplicatedPerTurn() {
+        let post = "C0000000-0000-4000-8000-000000000001"
+        let profile = SnapshotFixture.profile
+        send(provider: .codex)
+        manager.referencePost(threadId: a, turnId: "t1", postID: post.lowercased(), profileID: profile.lowercased())
+        manager.referencePost(threadId: a, turnId: "t1", postID: post, profileID: profile)
+        manager.referencePost(threadId: a, turnId: "wrong", postID: UUID().uuidString, profileID: profile)
+        manager.referencePost(threadId: a, turnId: "t1", postID: "bad", profileID: profile)
+        manager.referencePost(threadId: a, turnId: "t1", postID: post, profileID: "bad")
+        _ = manager.turnContext(threadId: a)
+        XCTAssertEqual(sent("post.referenced"), [["type": "post.referenced", "threadId": .string(a), "turnId": "t1", "seq": 2,
+                                                   "postID": .string(post), "profileID": .string(profile)]])
+        XCTAssertEqual(manager.replay(threadId: a, after: 1), sent("post.referenced"))
+        codex.sessions[0].emit(.turn(turnId: "t1", .completed(TurnUsage())))
+        manager.referencePost(threadId: a, turnId: "t1", postID: UUID().uuidString, profileID: profile)
+        _ = manager.turnContext(threadId: a)
+        XCTAssertEqual(sent("post.referenced").count, 1, "a late read must not add cards after completion")
+        send(turn: "t2", provider: .claude)
+        manager.referencePost(threadId: a, turnId: "t1", postID: UUID().uuidString, profileID: profile)
+        manager.referencePost(threadId: a, turnId: "t2", postID: post, profileID: profile)
+        _ = manager.turnContext(threadId: a)
+        XCTAssertEqual(sent("post.referenced").count, 2, "the new turn can reference the same post, but an old turn cannot")
+    }
+
     func testTheNextMessageReusesTheLiveSessionAndAModelChangeResumesIt() throws {
         send()
         claude.sessions[0].emit(.turn(turnId: "t1", .completed(TurnUsage())))

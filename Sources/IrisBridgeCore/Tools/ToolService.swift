@@ -22,8 +22,15 @@ public final class ToolService: @unchecked Sendable {
             let answer = approvals.check(threadId: threadId, toolName: arguments["tool_name"]?.stringValue ?? "", input: arguments["input"] ?? [:])
             return ToolResult(text: String(decoding: answer.encoded(), as: UTF8.self))
         }
-        if let read = reads.call(name, arguments) { return read }
+        // Capture ownership before reading; a turn that ends during the read cannot attach its result
+        // to a successor turn. SessionManager checks the captured turn again when it publishes.
         let turn = threadId.flatMap(turns.turnContext(threadId:))
+        if let read = reads.call(name, arguments) {
+            if !read.isError, let reference = read.postReference, let threadId, let turn {
+                turns.referencePost(threadId: threadId, turnId: turn.turnId, postID: reference.postID, profileID: reference.profileID)
+            }
+            return read
+        }
         let who = turn?.provider.rawValue ?? agent
         let actionId = ActionRelay.newActionId()
         do {

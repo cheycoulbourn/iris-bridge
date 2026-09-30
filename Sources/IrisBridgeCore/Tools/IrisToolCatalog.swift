@@ -165,9 +165,17 @@ public enum IrisToolCatalog {
 
 /// One MCP `tools/call` result: a sentence or JSON text for the model, and whether it failed.
 public struct ToolResult: Equatable {
+    /// Internal read metadata only, never included in the model's MCP result.
+    public struct PostReference: Equatable {
+        public var postID: String
+        public var profileID: String
+    }
     public var text: String
     public var isError: Bool
-    public init(text: String, isError: Bool = false) { self.text = text; self.isError = isError }
+    public var postReference: PostReference?
+    public init(text: String, isError: Bool = false, postReference: PostReference? = nil) {
+        self.text = text; self.isError = isError; self.postReference = postReference
+    }
     public static func failure(_ text: String) -> ToolResult { ToolResult(text: text, isError: true) }
     public static func json(_ value: JSONValue) -> ToolResult { ToolResult(text: String(decoding: value.encoded(), as: UTF8.self)) }
     public var json: JSONValue { ["content": [["type": "text", "text": .string(text)]], "isError": .bool(isError)] }

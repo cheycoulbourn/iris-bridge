@@ -13,7 +13,12 @@ public final class SessionManager: TurnContextProvider, @unchecked Sendable {
         public init(activeTurns: Int, idle: TimeInterval, liveSessions: Int) { self.activeTurns = activeTurns; self.idle = idle; self.liveSessions = liveSessions }
     }
 
-    private struct Turn { var id: String; var mentions: Set<String>; var commandConnectors: Set<String> }
+    private struct Turn {
+        var id: String
+        var mentions: Set<String>
+        var commandConnectors: Set<String>
+        var referencedPosts: Set<String> = []
+    }
 
     private struct ThreadState {
         var provider: Provider
@@ -95,6 +100,18 @@ public final class SessionManager: TurnContextProvider, @unchecked Sendable {
             guard let state = threads[threadId], let turn = state.turn else { return nil }
             return TurnContext(threadId: threadId, turnId: turn.id, provider: state.provider, mentions: turn.mentions,
                                commandConnectors: turn.commandConnectors, connectors: connectors)
+        }
+    }
+
+    /// Both providers share this read-reference boundary. Persist only ids, once per post/profile/turn;
+    /// a completed or replaced turn cannot gain cards from a late MCP response.
+    public func referencePost(threadId: String, turnId: String, postID: String, profileID: String) {
+        guard let post = UUID(uuidString: postID), let profile = UUID(uuidString: profileID) else { return }
+        queue.async {
+            guard self.threads[threadId]?.turn?.id == turnId else { return }
+            let key = profile.uuidString + "/" + post.uuidString
+            guard self.threads[threadId]?.turn?.referencedPosts.insert(key).inserted == true else { return }
+            self.publish(threadId, turnId, .postReferenced(postID: post.uuidString, profileID: profile.uuidString))
         }
     }
 

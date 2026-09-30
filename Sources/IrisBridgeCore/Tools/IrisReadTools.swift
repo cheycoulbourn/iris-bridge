@@ -25,7 +25,12 @@ public struct IrisReadTools {
         do {
             var body = try answer(name, arguments, held.snapshot)
             body["asOf"] = asOf(held)
-            return .json(.object(body))
+            var result = ToolResult.json(.object(body))
+            if name == "iris_get_post", let post = body["post"]?["id"]?.stringValue.flatMap(UUID.init(uuidString:)),
+               let profile = UUID(uuidString: held.snapshot.profileID) {
+                result.postReference = .init(postID: post.uuidString, profileID: profile.uuidString)
+            }
+            return result
         } catch {
             return .failure((error as? BridgeError)?.errorDescription ?? "Iris Bridge could not read that.")
         }

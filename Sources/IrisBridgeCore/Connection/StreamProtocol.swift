@@ -203,6 +203,8 @@ public enum TurnEvent: Equatable {
     case textDelta(String)
     case toolStarted(toolUseId: String, name: String, summary: String)
     case toolFinished(toolUseId: String, name: String, ok: Bool, summary: String)
+    /// A successful iris_get_post read; the app resolves its own record after checking the profile.
+    case postReferenced(postID: String, profileID: String)
     case completed(TurnUsage)
     case failed(ProviderFailure)
 
@@ -230,6 +232,8 @@ public enum TurnEvent: Equatable {
         case .toolFinished(let id, let name, let ok, let summary):
             body["type"] = "tool.finished"; body["toolUseId"] = .string(id); body["name"] = .string(name)
             body["ok"] = .bool(ok); body["summary"] = .string(summary)
+        case .postReferenced(let postID, let profileID):
+            body["type"] = "post.referenced"; body["postID"] = .string(postID); body["profileID"] = .string(profileID)
         case .completed(let usage):
             body["type"] = "turn.completed"; body["usage"] = usage.json
         case .failed(let failure):

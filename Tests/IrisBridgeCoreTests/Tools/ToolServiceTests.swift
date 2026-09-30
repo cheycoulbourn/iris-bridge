@@ -3,7 +3,11 @@ import XCTest
 
 private final class Turns: TurnContextProvider {
     var context: TurnContext?
+    var references: [(thread: String, turn: String, post: String, profile: String)] = []
     func turnContext(threadId: String) -> TurnContext? { context?.threadId == threadId ? context : nil }
+    func referencePost(threadId: String, turnId: String, postID: String, profileID: String) {
+        references.append((threadId, turnId, postID, profileID))
+    }
 }
 
 final class ToolServiceTests: XCTestCase {
@@ -38,6 +42,48 @@ final class ToolServiceTests: XCTestCase {
         let result = service.call(name: "iris_list_pillars", arguments: [:], threadId: nil, turnId: nil, agent: "claude")
         XCTAssertFalse(result.isError)
         XCTAssertTrue(result.text.contains("Slow mornings"))
+    }
+
+    func testASuccessfulPostReadReferencesItsKnownPostForBothChatProviders() {
+        push()
+        let post = "C0000000-0000-4000-8000-000000000001"
+        for provider in [Provider.claude, .codex] {
+            turns.context = TurnContext(threadId: thread, turnId: provider.rawValue, provider: provider, mentions: [], commandConnectors: [], connectors: ConnectorTable())
+            let result = service.call(name: "iris_get_post", arguments: ["postID": .string(post.lowercased())], threadId: thread, turnId: nil, agent: provider.rawValue)
+            XCTAssertFalse(result.isError)
+            XCTAssertEqual(turns.references.last?.thread, thread)
+            XCTAssertEqual(turns.references.last?.turn, provider.rawValue)
+            XCTAssertEqual(turns.references.last?.post, post)
+            XCTAssertEqual(turns.references.last?.profile, SnapshotFixture.profile)
+            XCTAssertNil(result.json["postReference"], "internal metadata must not leak into the MCP envelope")
+        }
+        XCTAssertEqual(turns.references.count, 2)
+    }
+
+    func testFailedMissingTerminalAndOtherReadsEmitNoPostReferences() {
+        turns.context = TurnContext(threadId: thread, turnId: "t1", provider: .codex, mentions: [], commandConnectors: [], connectors: ConnectorTable())
+        let post: JSONValue = "C0000000-0000-4000-8000-000000000001"
+        XCTAssertTrue(service.call(name: "iris_get_post", arguments: ["postID": post], threadId: thread, turnId: nil, agent: "codex").isError)
+        push()
+        for arguments: [String: JSONValue] in [[:], ["postID": "missing"], ["postID": post, "profileID": .string(UUID().uuidString)]] {
+            XCTAssertTrue(service.call(name: "iris_get_post", arguments: arguments, threadId: thread, turnId: nil, agent: "codex").isError)
+        }
+        _ = service.call(name: "iris_list_posts", arguments: [:], threadId: thread, turnId: nil, agent: "codex")
+        _ = service.call(name: "iris_get_post", arguments: ["postID": post], threadId: nil, turnId: "terminal", agent: "codex")
+        turns.context = nil
+        _ = service.call(name: "iris_get_post", arguments: ["postID": post], threadId: thread, turnId: nil, agent: "codex")
+        XCTAssertTrue(turns.references.isEmpty)
+    }
+
+    func testASnapshotWithANonUUIDPostCanReadButCannotCreateAClickableReference() {
+        var snapshot = SnapshotFixture.json
+        var fields = snapshot.objectValue!
+        fields["posts"] = [["id": "legacy-post", "title": "Legacy item"]]
+        snapshot = .object(fields)
+        XCTAssertNil(snapshots.push(profileId: SnapshotFixture.profile, revision: "rev-2", snapshot: snapshot))
+        turns.context = TurnContext(threadId: thread, turnId: "t1", provider: .claude, mentions: [], commandConnectors: [], connectors: ConnectorTable())
+        XCTAssertFalse(service.call(name: "iris_get_post", arguments: ["postID": "legacy-post"], threadId: thread, turnId: nil, agent: "claude").isError)
+        XCTAssertTrue(turns.references.isEmpty)
     }
 
     func testAChatTurnsChangeCarriesTheThreadTurnAndProvider() {

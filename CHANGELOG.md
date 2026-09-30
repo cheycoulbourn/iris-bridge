@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Codex chat can call all existing Iris read and change tools on fresh and resumed turns. Approval is scoped
+  to the named Iris tools; connector permissions, the read-only Mac sandbox and Inbox review remain in place.
+- A late Codex process exit or output cannot fail or contaminate the next reply, or remove its attachments.
+- Completed suggested chat drafts are submitted through the existing draft action for Inbox review, with
+  their conversation linkage and any requested posting date preserved.
+- Successful chat reads of a known post send an id-only `post.referenced` event for a clickable existing-post
+  card. It is deduplicated within the turn and replayed after reconnection. The optional `postReferences`
+  capability advertises it; older apps ignore the additive event. See [the contract](docs/post-reference-contract.md).
+
 ## 0.3.0
 
 Run the install command again to pick this up. Pairs with Iris build 142, the first with the new chat. The

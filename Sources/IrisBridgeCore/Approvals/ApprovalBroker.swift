@@ -3,6 +3,12 @@ import Foundation
 /// The turn a thread is answering right now, if any. `SessionManager` is the real one.
 public protocol TurnContextProvider: AnyObject {
     func turnContext(threadId: String) -> TurnContext?
+    /// A successful read of a known snapshot post; the real manager rechecks that this turn is active.
+    func referencePost(threadId: String, turnId: String, postID: String, profileID: String)
+}
+
+public extension TurnContextProvider {
+    func referencePost(threadId: String, turnId: String, postID: String, profileID: String) {}
 }
 
 /// Runs the permission-prompt tool (`mcp__iris__approval`, spec §6.5). Claude calls it with `{tool_name,

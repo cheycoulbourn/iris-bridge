@@ -58,6 +58,23 @@ final class ToolServiceTests: XCTestCase {
         XCTAssertEqual(queued.first?["action"]?["origin"], ["source": "agent", "agent": "claude", "turnID": "agent-1a2b3c4d"])
     }
 
+    func testAChatDraftAndItsDateReachInboxTogetherWithConversationLinkage() {
+        turns.context = TurnContext(threadId: thread, turnId: "t5", provider: .codex, mentions: [], commandConnectors: [], connectors: ConnectorTable())
+        let result = service.call(name: "iris_create_post_draft", arguments: ["title": "Kiln cam", "script": "Creator's exact draft", "date": "2026-10-02"],
+                                  threadId: thread, turnId: nil, agent: "codex-mcp-client")
+        XCTAssertFalse(result.isError)
+        let answer = try? JSONValue.decode(Data(result.text.utf8))
+        XCTAssertEqual(answer?["status"], "queued_for_review")
+        XCTAssertEqual(answer?["itemID"], "item_9")
+        XCTAssertTrue(result.text.contains("Inbox"))
+        let request = outbox.sentToOne.first
+        XCTAssertEqual(request?["threadId"], .string(thread))
+        XCTAssertEqual(request?["action"]?["origin"], ["source": "chat", "agent": "codex", "threadID": .string(thread), "turnID": "t5"])
+        let actions = request?["action"]?["actions"]?.arrayValue
+        XCTAssertEqual(actions?.map { $0["name"] }, ["iris_create_post_draft", "iris_schedule_post"])
+        XCTAssertEqual(actions?.first?["input"]?["script"], "Creator's exact draft")
+    }
+
     func testARevisionMustNameAnItemTheCreatorAskedToChange() {
         push()
         XCTAssertEqual(service.call(name: "iris_revise_review_item", arguments: ["itemID": "item_0001", "tool": "iris_create_task", "input": ["title": "x"]],

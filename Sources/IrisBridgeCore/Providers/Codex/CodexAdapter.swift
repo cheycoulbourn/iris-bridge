@@ -50,6 +50,7 @@ final class CodexSession: ProviderSession, @unchecked Sendable {
     private var lines: [String] = []
     private var cancelled = false
     private var imageFolder: URL?
+    private var runId: UUID?
 
     init(threadId: String, sessionId: String?, model: String?, effort: String? = nil, setup: CodexSetup, launcher: ProcessLauncher, events: @escaping (ProviderEvent) -> Void) {
         self.threadId = threadId; self.id = sessionId; self.model = model; self.effort = effort; self.setup = setup; self.launcher = launcher; self.events = events
@@ -76,14 +77,23 @@ final class CodexSession: ProviderSession, @unchecked Sendable {
             folder = made
         }
         try queue.sync {
+            let run = UUID()
             let resuming = id
             let prompt = resuming == nil ? IrisPrompt.system + "\n\n" + turn.text : turn.text
             let command = ProviderCommand(arguments: CodexCommandLine.arguments(binary: binary, resume: resuming, model: model, effort: effort, helperBinary: setup.helperBinary,
                                                                                 threadId: threadId, root: setup.root, port: setup.port, images: files),
                                           workingDirectory: setup.workingDirectory, input: Data(prompt.utf8))
-            turnId = turn.turnId; lines = []; cancelled = false; imageFolder = folder
-            process = try launcher.launch(command, line: { [weak self] line in self?.queue.async { self?.handle(line) } },
-                                          exit: { [weak self] status, stderr in self?.queue.async { self?.exited(status, stderr) } })
+            turnId = turn.turnId; lines = []; cancelled = false; imageFolder = folder; runId = run
+            process = try launcher.launch(command, line: { [weak self] line in self?.queue.async {
+                guard self?.runId == run else { return }
+                self?.handle(line)
+            } }, exit: { [weak self] status, stderr in self?.queue.async {
+                // A completed turn may already have started its successor. Old output and exits must
+                // never finish that turn or clear its process, and each run cleans up its own images.
+                if let folder { try? FileManager.default.removeItem(at: folder) }
+                guard self?.runId == run else { return }
+                self?.exited(status, stderr)
+            } })
         }
     }
 

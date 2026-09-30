@@ -1,0 +1,11 @@
+{"dir":"in","obj":{"type":"stdin"}}
+{"dir":"out","obj":{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}}
+{"dir":"out","obj":{"type":"turn.started"}}
+{"dir":"out","obj":{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll call the summary once, then create the draft once and report its receipt.\n"}}}
+{"dir":"out","obj":{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"iris","tool":"iris_workspace_summary","arguments":{},"result":null,"error":null,"status":"in_progress"}}}
+{"dir":"out","obj":{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"iris","tool":"iris_workspace_summary","arguments":{},"result":{"content":[{"type":"text","text":"{\"profile\": \"synthetic\", \"pillars\": [\"Test\"], \"platforms\": [\"Instagram\"], \"formats\": [\"Reel\"], \"posts\": []}"}],"structured_content":null},"error":null,"status":"completed"}}}
+{"dir":"out","obj":{"type":"item.started","item":{"id":"item_2","type":"mcp_tool_call","server":"iris","tool":"iris_create_post_draft","arguments":{"title":"Synthetic draft"},"result":null,"error":null,"status":"in_progress"}}}
+{"dir":"out","obj":{"type":"item.completed","item":{"id":"item_2","type":"mcp_tool_call","server":"iris","tool":"iris_create_post_draft","arguments":{"title":"Synthetic draft"},"result":{"content":[{"type":"text","text":"{\"status\": \"queued_for_review\", \"itemID\": \"fixture-inbox\", \"note\": \"Synthetic dry test only; no creator records changed.\"}"}],"structured_content":null},"error":null,"status":"completed"}}}
+{"dir":"out","obj":{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Receipt: `queued_for_review`  \nItem ID: `fixture-inbox`\n\nSynthetic dry test only; no creator records changed."}}}
+{"dir":"out","obj":{"type":"turn.completed","usage":{"input_tokens":101360,"cached_input_tokens":92160,"cache_write_input_tokens":0,"output_tokens":404,"reasoning_output_tokens":0}}}
+{"dir":"exit","status":0,"stderr":""}

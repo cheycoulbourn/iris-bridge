@@ -2,8 +2,8 @@ import Foundation
 
 /// The `codex exec` command lines (spec §6.4). The first-turn flags are the ones the phase 1 spike verified on
 /// Codex 0.155.0-alpha.9.2 (q4-a): only the Iris server loads, the owner's own Codex config stays unloaded, and
-/// no `--disable` name is refused. The `exec resume` flags come from its `--help`; resume, tool calls and their
-/// events are unverified until the spike's Codex retry (S7) runs.
+/// no `--disable` name is refused. The current Iris-only approval overrides, first and resumed tool calls
+/// were verified on installed Codex 0.159.0 with a synthetic MCP server (Fixtures/README.md).
 public enum CodexCommandLine {
     /// Everything but the shell, the web and the owner's own setup.
     static let disabledFeatures = ["shell_tool", "unified_exec", "apps", "browser_use", "computer_use", "code_mode", "hooks", "plugins", "memories"]
@@ -21,6 +21,12 @@ public enum CodexCommandLine {
                       // Passed on every run: a per-run server is not remembered by a resumed session.
                       "-c", "mcp_servers.iris.command=\(toml(helperBinary))",
                       "-c", "mcp_servers.iris.args=[\(["mcp", "--thread", threadId, "--root", root.path, "--port", String(port)].map(toml).joined(separator: ","))]"]
+        // exec cannot show Codex's MCP permission prompts. Only the known Iris tools may reach our
+        // loopback relay: Iris itself enforces Inbox review, while Claude connector approvals stay in
+        // ApprovalBroker. Do not trust other servers, future tools, or the Claude-only approval tool.
+        let tools = IrisToolCatalog.all.map(\.name)
+        arguments += ["-c", "mcp_servers.iris.enabled_tools=[\(tools.map(toml).joined(separator: ","))]"]
+        for tool in tools { arguments += ["-c", "mcp_servers.iris.tools.\(tool).approval_mode=\"approve\""] }
         for feature in disabledFeatures { arguments += ["--disable", feature] }
         if let model { arguments += ["-c", "model=\(toml(model))"] }
         // Codex documents `model_reasoning_effort` as low/medium/high; the app's xhigh and max (Claude-only

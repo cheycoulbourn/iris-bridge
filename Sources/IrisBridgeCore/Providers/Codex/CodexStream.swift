@@ -1,8 +1,8 @@
 import Foundation
 
 /// One line of `codex exec --json` output. `thread.started`, `turn.started`, `error` and `turn.failed` are the
-/// shapes the phase 1 spike recorded (q4-a); `item.*` for `mcp_tool_call`, `agent_message` and `reasoning` and
-/// `turn.completed` follow Codex's documented exec JSON output and are unverified until the spike's retry (S7).
+/// shapes the phase 1 spike recorded (q4-a). The tool, message and completion events were also recorded on
+/// installed Codex 0.159.0 against a synthetic Iris MCP server on first and resumed turns (Fixtures/README.md).
 public enum CodexStream {
     public enum Item: Equatable {
         case threadStarted(String)

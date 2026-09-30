@@ -29,7 +29,7 @@ public enum IrisToolCatalog {
                                 "revisionReview", "finalEdits", "finalReview", "approved", "changesRequested", "denied", "cancelled",
                                 "captions", "ready", "scheduled", "published"]
 
-    static let rules = "Call iris_workspace_summary first and use pillar, platform and format names exactly as it spells them. Keep the creator's own writing exactly as written when you import it. Small changes apply at once and the creator can undo them in Activity; posting dates, stages past editing, marking posted, archiving and new series wait for the creator's approval in the Inbox. Each result says which happened."
+    static let rules = "Call iris_workspace_summary first and use pillar, platform and format names exactly as it spells them. Keep the creator's own writing exactly as written when you import it. Drafts created in chat wait for the creator's approval in the Inbox before entering the planner. Other small changes apply at once and the creator can undo them in Activity; posting dates, stages past editing, marking posted, archiving and new series wait for Inbox approval. Each result says which happened; queued_for_review means pending review."
 
     private static func string(_ description: String) -> JSONValue { ["type": "string", "description": .string(description)] }
     private static let date = string("A day, as yyyy-MM-dd.")
@@ -106,7 +106,7 @@ public enum IrisToolCatalog {
             Tool(name: "iris_update_idea", kind: .change, activity: "Updating an idea", description: "Change an idea. " + rules,
                  properties: ["ideaID": id, "title": string("New title."), "note": string("New note."), "pillar": string("An existing pillar name.")], required: ["ideaID"]),
             Tool(name: "iris_create_post_draft", kind: .change, activity: "Drafting a post",
-                 description: "Create a post draft. Give date (and time) to also set its posting date, which waits for approval. " + rules,
+                 description: "Submit a completed suggested post draft for the creator to review. Drafts created in chat wait in the Inbox, linked to this conversation. Give date (and time) to also request its posting date, reviewed with the draft. " + rules,
                  properties: postFields.merging(["date": date, "time": time]) { $1 }, required: ["title"]),
             Tool(name: "iris_update_post_draft", kind: .change, activity: "Editing a post",
                  description: "Change a post's text: title, hook, script, scenes, caption, CTA, notes, pillar, platform or format. Pass the revision iris_get_post returned as expectedRevision; a post changed since is not overwritten. " + rules,

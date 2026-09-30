@@ -7,9 +7,10 @@
 - A late Codex process exit or output cannot fail or contaminate the next reply, or remove its attachments.
 - Completed suggested chat drafts are submitted through the existing draft action for Inbox review, with
   their conversation linkage and any requested posting date preserved.
-- Successful chat reads of a known post send an id-only `post.referenced` event for a clickable existing-post
-  card. It is deduplicated within the turn and replayed after reconnection. The optional `postReferences`
-  capability advertises it; older apps ignore the additive event. See [the contract](docs/post-reference-contract.md).
+- Successful chat reads of a known post send id-only `postReference` metadata on a `thinking` event for a
+  clickable existing-post card. It is deduplicated within the turn and replayed after reconnection. The
+  optional `postReferences` capability advertises it; older apps consume the event's sequence normally.
+  See [the contract](docs/post-reference-contract.md).
 
 ## 0.3.0
 

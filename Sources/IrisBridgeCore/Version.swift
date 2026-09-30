@@ -6,6 +6,7 @@ public enum BridgeVersion {
     /// old version gates: chat 0.1.0, inbox 0.2.0, modelSelection 0.2.3, plannerAccess 0.2.4. `v3` is the
     /// WebSocket stream, sessions, the new Iris tools and approvals (0.3.0). `effort` is `thread.send.effort`:
     /// the app shows the reasoning-effort choice only when it is listed (`StreamIdentifiers.efforts`).
-    /// `postReferences` adds id-only, replayable post.referenced events; older apps ignore this type.
+    /// `postReferences` adds id-only postReference metadata to replayable thinking events; old apps
+    /// consume the existing type and sequence normally while ignoring the additional metadata.
     public static let capabilities = ["chat", "inbox", "modelSelection", "plannerAccess", "causes", "health", "authStatus", "v3", "effort", "postReferences"]
 }

@@ -233,7 +233,10 @@ public enum TurnEvent: Equatable {
             body["type"] = "tool.finished"; body["toolUseId"] = .string(id); body["name"] = .string(name)
             body["ok"] = .bool(ok); body["summary"] = .string(summary)
         case .postReferenced(let postID, let profileID):
-            body["type"] = "post.referenced"; body["postID"] = .string(postID); body["profileID"] = .string(profileID)
+            // Existing v3 clients consume thinking's seq. A new unknown type would be ignored without
+            // advancing their cursor, making the next event look like a missed part of the reply.
+            body["type"] = "thinking"
+            body["postReference"] = ["postID": .string(postID), "profileID": .string(profileID)]
         case .completed(let usage):
             body["type"] = "turn.completed"; body["usage"] = usage.json
         case .failed(let failure):

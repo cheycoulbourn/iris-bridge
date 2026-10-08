@@ -131,6 +131,17 @@ public final class AdminClient {
         return (code, body["expiresAt"] as? String ?? "")
     }
 
+    public func pairQR() throws -> PairingQRPayload {
+        let (status, data) = try callData("POST", "/admin/pair-qr")
+        guard status == 200 else {
+            throw Self.statusError(status, ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any]) ?? [:], while: "create a pairing QR code")
+        }
+        guard let payload = try? JSONDecoder().decode(PairingQRPayload.self, from: data) else {
+            throw BridgeError.message("Iris Bridge did not send back a pairing QR code.")
+        }
+        return payload
+    }
+
     public func status() throws -> [String: Any] {
         try expect200("GET", "/status", while: "report its status")
     }

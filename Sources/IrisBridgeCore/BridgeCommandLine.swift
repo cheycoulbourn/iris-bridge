@@ -10,7 +10,7 @@ public struct BridgeCommandLine: Equatable {
     public static let valueOptions: Set<String> = ["--root", "--port", "--binary", "--thread"]
     /// Valueless switches the helper understands. Anything else starting with `-` is a typo, and a typo that
     /// is quietly ignored is worse than an error: `status --prot 48797` would talk to the default port.
-    public static let knownFlags: Set<String> = ["--no-bonjour"]
+    public static let knownFlags: Set<String> = ["--no-bonjour", "--code-only"]
 
     /// The subcommand, or `serve` when the user typed nothing.
     public let command: String

@@ -33,7 +33,7 @@ public final class BridgeRuntime {
         let tools = ToolService(reads: IrisReadTools(snapshots: snapshots, hasPairedDevices: { !devices.all.isEmpty }), relay: relay,
                                 approvals: approvals, snapshots: snapshots, turns: sessions)
         router = Router(fingerprint: fingerprint, hostName: hostName, adminToken: adminToken, devices: devices, pairing: pairing,
-                        inbox: inbox, context: context, generator: generator, log: log, tools: tools)
+                        inbox: inbox, context: context, generator: generator, log: log, tools: tools, pairingURL: "https://\(HostName.localHostName()):\(port)")
         streams = BridgeStreams(sessions: sessions, approvals: approvals, relay: relay, snapshots: snapshots, health: health, log: log)
         let health = self.health
         sessions.outbox = hub; sessions.approvals = approvals

@@ -1,7 +1,7 @@
 import Foundation
 import IrisBridgeCore
 
-let usage = "Usage: iris-bridge [serve|pair|status|devices|revoke <id>|inbox [clear-decided]|mcp|install-agent --binary <path>|uninstall|version]"
+let usage = "Usage: iris-bridge [serve|pair [--code-only]|status|devices|revoke <id>|inbox [clear-decided]|mcp|install-agent --binary <path>|uninstall|version]"
 
 func complain(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
@@ -44,6 +44,12 @@ func serve(root: String?, port: UInt16, bonjour: Bool) throws {
                                   advertise: bonjour, log: log, streams: runtime.hub)
     signal(SIGPIPE, SIG_IGN)
     try server.start()
+    // Only the standard installation shares its public pin with Iris. Scratch/test helpers never touch
+    // the real app group, and a failed descriptor write does not disrupt existing paired devices.
+    if root == nil {
+        do { try LocalBridgeIdentity.write(fingerprint: identity.fingerprint) }
+        catch { log.error("Could not prepare secure local pairing. Open Iris once, then restart the helper or use the manual pairing code.") }
+    }
     // A cold `claude auth status` can outlast the app's first poll, so both checks start now, side by side and
     // behind the listener; the health monitor's first round, which checks one provider after the other, joins them.
     generator.startSignInChecks()
@@ -95,7 +101,24 @@ do {
     case "serve":
         try serve(root: line.options["--root"], port: port, bonjour: !line.flags.contains("--no-bonjour"))
     case "pair":
-        printPairingCode(try AdminClient(paths: paths, port: port).pairCode().code)
+        let client = try AdminClient(paths: paths, port: port)
+        // Pairing credentials belong on a person's terminal, never in redirected logs or a pipe.
+        if !line.flags.contains("--code-only") {
+            guard isatty(1) != 0 else { throw BridgeError.message("Open Terminal and run `iris-bridge pair` to show a QR code, or use --code-only for the manual code.") }
+            let payload = try client.pairQR()
+            print("\n  Scan this QR code in Iris on your iPhone or iPad. Keep this screen private.\n")
+            let rendered = try TerminalPairingQR.render(payload)
+            let columns = rendered.components(separatedBy: "\n").first?
+                .replacingOccurrences(of: "\u{001B}[30;47m", with: "").replacingOccurrences(of: "\u{001B}[0m", with: "").count ?? 0
+            var terminal = winsize()
+            let knownWidth = ioctl(STDOUT_FILENO, TIOCGWINSZ, &terminal) == 0 && terminal.ws_col > 0
+            if knownWidth && Int(terminal.ws_col) < columns {
+                print("  This QR needs \(columns) columns. Widen Terminal to at least \(columns) columns and run `iris-bridge pair` again.")
+            } else {
+                print(rendered)
+            }
+        }
+        printPairingCode(try client.pairCode().code)
     case "status":
         let s = try AdminClient(paths: paths, port: port).status()
         let addresses = [HostName.localHostName()] + HostName.lanAddresses()

@@ -10,6 +10,31 @@ Then open Iris, choose this Mac under "Macs nearby", and enter the code shown in
 
 Commands: `iris-bridge pair`, `iris-bridge status`, `iris-bridge devices`, `iris-bridge revoke <id>`, `iris-bridge inbox`, `iris-bridge uninstall`.
 
+### Connecting Iris
+
+On this Mac, Iris can connect over loopback after a native macOS confirmation. Compare the connection
+number shown in Iris with the number in the macOS dialog, then choose Allow only if they match. Cancel
+is the default; the request times out after one minute. The helper accepts one confirmation at a time
+and limits repeated requests.
+
+For iPhone or iPad, run `iris-bridge pair` in Terminal and scan the QR code from Iris. It includes this Mac's
+local address and certificate fingerprint; its private pairing secret expires in ten minutes and works
+once. Keep the screen private. The QR uses black modules on a white background in either Terminal theme.
+If your Terminal is too narrow, the command reports the required width and still shows the manual code.
+Use `iris-bridge pair --code-only` for an older Iris app or the six-digit fallback.
+
+The standard helper writes its public certificate pin to Iris's existing, user-owned app group so the
+Mac app can verify the loopback helper before requesting approval. No credential is shared in that file.
+`POST /pair/local` accepts only loopback, JSON, Mac requests without an Origin header. It requires a random
+32-hex confirmation value plus native approval of its displayed prefix. Approval returns a one-use token
+held in memory for 60 seconds; `POST /pair/local/complete` requires that token and the original confirmation
+before it saves a device. Leaving Iris during the dialog creates no device.
+
+`POST /admin/pair-qr` requires the existing loopback admin token. The app proves possession at `POST /pair/qr`
+using HMAC-SHA256 with the hex secret's UTF-8 bytes as key and the lowercase certificate fingerprint as
+message. QR challenges remain in memory and disappear when the helper stops; the existing `POST /pair`
+code flow is unchanged.
+
 ## Iris chat on this Mac (0.3.0)
 
 An Iris app with the new chat keeps one secure connection open to this Mac while it is in the foreground
@@ -120,6 +145,7 @@ without it Claude Code only adds them to the one folder you ran the command in.
 Every release is checked against the real Claude Code and Codex before it ships:
 
     swift test --scratch-path /tmp/iris-bridge-build
+    python3 Tests/pairing-cli-test.py /tmp/iris-bridge-build/debug/iris-bridge
     sh Tests/integration.sh
     sh Tests/install-test.sh
     sh Tests/smoke-test.sh      # the smoke script itself, against the stub CLIs

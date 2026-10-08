@@ -106,7 +106,7 @@ public struct HTTPResponse {
     public init(failure: ProviderFailure, now: Date = Date()) { self.init(status: failure.httpStatus, json: failure.body(now: now)) }
     public init(status: Int, data: Data) { self.status = status; body = data }
     private static let reasons = [200: "OK", 400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found",
-                                  409: "Conflict", 413: "Payload Too Large", 429: "Too Many Requests", 500: "Internal Server Error",
+                                  409: "Conflict", 413: "Payload Too Large", 415: "Unsupported Media Type", 429: "Too Many Requests", 500: "Internal Server Error",
                                   502: "Bad Gateway", 504: "Gateway Timeout"]
     public func serialized() -> Data {
         var head = "HTTP/1.1 \(status) \(Self.reasons[status] ?? "Status")\r\n"

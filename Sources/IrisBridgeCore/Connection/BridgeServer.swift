@@ -84,6 +84,7 @@ public final class BridgeServer: @unchecked Sendable {
             // .waiting, so both routes give the same friendly instruction.
             throw Self.isAddressInUse(failure) ? Self.portInUse(attemptedPort) : failure
         }
+        if let actualPort { router.updateListeningPort(actualPort) }
         // Once the listener is up, failures are asynchronous and would otherwise be silent: the helper would
         // sit there answering nothing. Exit instead so launchd's KeepAlive restarts a healthy copy.
         // .waiting is not that: a listener that has already served can drop into .waiting when an interface

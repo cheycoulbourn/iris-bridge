@@ -29,6 +29,16 @@ public final class Router: @unchecked Sendable {
     private let inbox: InboxStore, contextStore: ContextStore
     private let now: () -> Date
     private let pairLimiter: RateLimiter
+    private let qrPairing: PairingQRStore
+    private var pairingURL: String
+    private let localApproval: (String) -> Bool
+    private let localPairLimiter: RateLimiter
+    private let localPairLock = NSLock()
+    private var localPairPending = false
+    private var localPairNextAllowed = Date.distantPast
+    private struct LocalApproval { let tokenHash: String; let confirmation: String; let name: String; let expiresAt: Date }
+    private var approvedLocalPairing: LocalApproval?
+    private let localCompletionLimiter: RateLimiter
     /// The v3 tool path for `iris-bridge mcp` (`POST /admin/v3/tool`). Nil only in tests that never call a tool.
     private let tools: ToolService?
     private let lock = NSLock()
@@ -38,11 +48,24 @@ public final class Router: @unchecked Sendable {
 
     public init(fingerprint: String, hostName: String, adminToken: String, devices: DeviceStore, pairing: PairingCodeStore,
                 inbox: InboxStore, context contextStore: ContextStore, generator: Generator, log: BridgeLog?,
-                tools: ToolService? = nil, now: @escaping () -> Date = Date.init) {
+                tools: ToolService? = nil, now: @escaping () -> Date = Date.init,
+                pairingURL: String = "https://\(HostName.localHostName()):48731",
+                localApproval: @escaping (String) -> Bool = LocalPairingApproval.request) {
         self.fingerprint = fingerprint; self.hostName = hostName; self.adminToken = adminToken; self.tools = tools
         self.devices = devices; self.pairing = pairing; self.generator = generator; self.log = log; self.now = now
         self.inbox = inbox; self.contextStore = contextStore
         pairLimiter = RateLimiter(limit: 10, per: 60, now: now)
+        qrPairing = PairingQRStore(now: now); self.pairingURL = pairingURL; self.localApproval = localApproval
+        localPairLimiter = RateLimiter(limit: 3, per: 60, now: now)
+        localCompletionLimiter = RateLimiter(limit: 10, per: 60, now: now)
+    }
+
+    /// Called after a listener chooses its port, including port zero used by isolated tests.
+    func updateListeningPort(_ port: UInt16) {
+        lock.lock(); defer { lock.unlock() }
+        guard var url = URLComponents(string: pairingURL) else { return }
+        url.port = Int(port)
+        if let value = url.string { pairingURL = value }
     }
 
     public func handle(_ request: HTTPRequest, context: RequestContext) -> HTTPResponse {
@@ -51,6 +74,9 @@ public final class Router: @unchecked Sendable {
         switch (request.method, request.route) {
         case ("GET", "/status"): return status(bearer: bearer, context: context)
         case ("POST", "/pair"): return pair(request, context: context)
+        case ("POST", "/pair/local"): return pairLocal(request, context: context)
+        case ("POST", "/pair/local/complete"): return completeLocalPairing(request, context: context)
+        case ("POST", "/pair/qr"): return pairQR(request, context: context)
         case ("GET", "/models"): return authenticated(bearer) { _ in self.models(request) }
         case ("POST", "/message"): return authenticated(bearer) { _ in self.message(request) }
         case ("POST", "/cancel"): return authenticated(bearer) { _ in self.cancel(request) }
@@ -139,6 +165,89 @@ public final class Router: @unchecked Sendable {
         }
     }
 
+    private static func isJSON(_ request: HTTPRequest) -> Bool {
+        request.header("content-type")?.split(separator: ";", maxSplits: 1).first?
+            .trimmingCharacters(in: .whitespaces).lowercased() == "application/json"
+    }
+
+    /// No network peer or browser can invoke the native prompt. All valid local requests share the guard,
+    /// so changing addresses cannot open concurrent prompts or bypass the cooldown.
+    private func pairLocal(_ request: HTTPRequest, context: RequestContext) -> HTTPResponse {
+        guard context.isLoopback else { return HTTPResponse(status: 403, error: "local-pairing-only") }
+        guard Self.isJSON(request) else { return HTTPResponse(status: 415, error: "json-required") }
+        guard request.body.count <= 1024,
+              let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+              let name = body["deviceName"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 80,
+              body["platform"] as? String == "mac",
+              let confirmation = body["confirmation"] as? String, LocalPairingApproval.valid(confirmation) else { return HTTPResponse(status: 400, error: "bad-request") }
+        localPairLock.lock()
+        guard !localPairPending else { localPairLock.unlock(); return HTTPResponse(status: 409, error: "local-pairing-busy") }
+        guard now() >= localPairNextAllowed, localPairLimiter.allow("local") else {
+            localPairLock.unlock(); return HTTPResponse(status: 429, error: "too-many-attempts")
+        }
+        localPairPending = true
+        localPairLock.unlock()
+        defer {
+            localPairLock.lock(); localPairPending = false; localPairNextAllowed = now().addingTimeInterval(10); localPairLock.unlock()
+        }
+        guard localApproval(confirmation) else { return HTTPResponse(status: 403, error: "local-pairing-declined") }
+        let approvalToken = DeviceStore.randomToken(), expiresAt = now().addingTimeInterval(60)
+        localPairLock.lock()
+        approvedLocalPairing = LocalApproval(tokenHash: DeviceStore.hash(approvalToken), confirmation: confirmation.lowercased(), name: name, expiresAt: expiresAt)
+        localPairLock.unlock()
+        return HTTPResponse(status: 200, json: ["approvalToken": approvalToken, "expiresAt": ISO8601DateFormatter().string(from: expiresAt)])
+    }
+
+    private func completeLocalPairing(_ request: HTTPRequest, context: RequestContext) -> HTTPResponse {
+        guard context.isLoopback else { return HTTPResponse(status: 403, error: "local-pairing-only") }
+        guard Self.isJSON(request) else { return HTTPResponse(status: 415, error: "json-required") }
+        guard localCompletionLimiter.allow("local") else { return HTTPResponse(status: 429, error: "too-many-attempts") }
+        guard request.body.count <= 1024,
+              let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+              let token = body["approvalToken"] as? String, !token.isEmpty, token.count <= 128,
+              let confirmation = body["confirmation"] as? String, LocalPairingApproval.valid(confirmation) else {
+            return HTTPResponse(status: 400, error: "bad-request")
+        }
+        localPairLock.lock()
+        guard let approved = approvedLocalPairing, now() < approved.expiresAt else {
+            approvedLocalPairing = nil; localPairLock.unlock()
+            return HTTPResponse(status: 403, error: "local-approval-expired")
+        }
+        guard PairingProof.constantTimeEqual(DeviceStore.hash(token), approved.tokenHash),
+              PairingProof.constantTimeEqual(confirmation.lowercased(), approved.confirmation) else {
+            localPairLock.unlock(); return HTTPResponse(status: 403, error: "local-approval-invalid")
+        }
+        approvedLocalPairing = nil
+        localPairLock.unlock()
+        return issueDevice(name: approved.name, platform: "mac")
+    }
+
+    private func pairQR(_ request: HTTPRequest, context: RequestContext) -> HTTPResponse {
+        guard pairLimiter.allow(context.sourceAddress) else { return HTTPResponse(status: 429, error: "too-many-attempts") }
+        guard Self.isJSON(request) else { return HTTPResponse(status: 415, error: "json-required") }
+        guard request.body.count <= 1024,
+              let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any],
+              let proof = body["proof"] as? String, proof.count == 64, proof.utf8.allSatisfy({ (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0) }),
+              let name = body["deviceName"] as? String, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 80,
+              let platform = body["platform"] as? String, ["mac", "iphone", "ipad"].contains(platform) else {
+            return HTTPResponse(status: 400, error: "bad-request")
+        }
+        switch qrPairing.redeem(proof: proof, fingerprint: fingerprint) {
+        case .accepted: return issueDevice(name: name, platform: platform)
+        case .invalid: return HTTPResponse(status: 400, error: "qr-invalid")
+        case .expired: return HTTPResponse(status: 400, error: "qr-expired")
+        case .unavailable: return HTTPResponse(status: 400, error: "qr-expired")
+        }
+    }
+
+    private func issueDevice(name: String, platform: String) -> HTTPResponse {
+        guard let (device, token) = try? devices.issue(name: name, platform: platform) else {
+            return HTTPResponse(status: 500, error: "Could not save the device.")
+        }
+        log?.info("paired device \(device.id) (\(device.platform))")
+        return HTTPResponse(status: 200, json: ["deviceID": device.id, "token": token, "hostName": hostName])
+    }
+
     private func message(_ request: HTTPRequest) -> HTTPResponse {
         let parsed: MessageRequest
         do { parsed = try MessageValidation.parse(request.body) } catch { return HTTPResponse(status: 400, error: (error as? BridgeError)?.errorDescription ?? "Could not read this message.") }
@@ -198,6 +307,9 @@ public final class Router: @unchecked Sendable {
 
     private func admin(_ request: HTTPRequest) -> HTTPResponse {
         switch (request.method, request.route) {
+        case ("POST", "/admin/pair-qr"):
+            lock.lock(); let url = pairingURL; lock.unlock()
+            return Self.encoded(200, qrPairing.issue(url: url, fingerprint: fingerprint, hostName: hostName))
         case ("POST", "/admin/pair-code"):
             let issued = pairing.issue()
             return HTTPResponse(status: 200, json: ["code": issued.code, "expiresAt": ISO8601DateFormatter().string(from: issued.expiresAt)])

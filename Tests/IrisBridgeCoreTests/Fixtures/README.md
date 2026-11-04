@@ -42,3 +42,4 @@ or connector content from the owner's Mac is in any of them.
 | `codex-exec-resume` | Constructed like `codex-exec-tool-call`, for `codex exec resume`. **Unverified** until S7. |
 | `codex-exec-hang` | Constructed: a run that never finishes, for cancel. |
 | `snapshot-v2.json` | Constructed: a fictional workspace in snapshot schema 2 (contract §5). |
+| `snapshot-v2-subpillars.json` | Constructed: `snapshot-v2.json` plus the keys a later Iris build shares for sub-pillars: a pillar's `subpillars` (one with no name, which the reader drops, and one empty list), a post's and an idea's `subpillar` (set, absent, and empty text). `snapshot-v2.json` stays as an older app pushes it. |

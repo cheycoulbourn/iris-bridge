@@ -1,14 +1,19 @@
 import XCTest
 @testable import IrisBridgeCore
 
-/// The pushed snapshot fixture: Fixtures/snapshot-v2.json (fictional workspace, contract §5).
+/// The pushed snapshot fixture: Fixtures/snapshot-v2.json (fictional workspace, contract §5), as an Iris build
+/// without sub-pillars pushes it; Fixtures/snapshot-v2-subpillars.json adds the sub-pillar keys a later build shares.
 enum SnapshotFixture {
     static let profile = "A1B2C3D4-0000-4000-8000-000000000001"
-    static var json: JSONValue {
-        let url = Bundle.module.url(forResource: "snapshot-v2", withExtension: "json", subdirectory: "Fixtures")!
+    static var json: JSONValue { load("snapshot-v2") }
+    static var snapshot: IrisSnapshot { IrisSnapshot(json: json, profileID: profile, revision: "rev-1") }
+    static var subpillarsJSON: JSONValue { load("snapshot-v2-subpillars") }
+    static var subpillarsSnapshot: IrisSnapshot { IrisSnapshot(json: subpillarsJSON, profileID: profile, revision: "rev-1") }
+
+    private static func load(_ name: String) -> JSONValue {
+        let url = Bundle.module.url(forResource: name, withExtension: "json", subdirectory: "Fixtures")!
         return try! JSONValue.decode(Data(contentsOf: url))
     }
-    static var snapshot: IrisSnapshot { IrisSnapshot(json: json, profileID: profile, revision: "rev-1") }
 }
 
 final class IrisSnapshotTests: XCTestCase {
@@ -42,6 +47,37 @@ final class IrisSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.timeZone, .current)
     }
 
+    func testAnOlderAppsSnapshotReadsWithoutSubpillars() {
+        let snapshot = SnapshotFixture.snapshot
+        XCTAssertEqual(snapshot.pillars.count, 3)
+        XCTAssertTrue(snapshot.pillars.allSatisfy { $0.subpillars.isEmpty })
+        XCTAssertTrue(snapshot.posts.allSatisfy { $0.subpillar == nil })
+        XCTAssertTrue(snapshot.ideas.allSatisfy { $0.subpillar == nil })
+    }
+
+    func testSubpillarsOnPillarsPostsAndIdeasRead() {
+        let snapshot = SnapshotFixture.subpillarsSnapshot
+        XCTAssertEqual(snapshot.pillars[0].subpillars, [IrisSnapshot.Subpillar(name: "Kettle rituals", detail: "The first ten minutes."),
+                                                         IrisSnapshot.Subpillar(name: "Window light", detail: "")],
+                       "an entry with no name is dropped")
+        XCTAssertEqual(snapshot.pillars[1].subpillars, [], "no key reads as none")
+        XCTAssertEqual(snapshot.pillars[2].subpillars, [], "an empty list reads as none")
+        XCTAssertEqual(snapshot.posts.map(\.subpillar), ["Kettle rituals", nil, nil, "Window light", nil], "empty text and a missing key both read as nil")
+        XCTAssertEqual(snapshot.ideas.map(\.subpillar), ["Kettle rituals", nil, nil])
+        XCTAssertEqual(snapshot.posts[0].title, SnapshotFixture.snapshot.posts[0].title, "everything else reads as before")
+    }
+
+    func testMistypedSubpillarFieldsTakeDefaults() {
+        let snapshot = IrisSnapshot(json: ["schemaVersion": 2,
+                                           "pillars": [["name": "A", "subpillars": "Beginner"], ["name": "B", "subpillars": ["Beginner", ["name": 7, "detail": "x"], ["name": "Kept", "detail": 3]]]],
+                                           "posts": [["title": "P", "subpillar": 4]], "ideas": [["title": "I", "subpillar": ["Beginner"]]]],
+                                    profileID: "p", revision: "r")
+        XCTAssertEqual(snapshot.pillars[0].subpillars, [])
+        XCTAssertEqual(snapshot.pillars[1].subpillars, [IrisSnapshot.Subpillar(name: "Kept", detail: "")])
+        XCTAssertNil(snapshot.posts.first?.subpillar)
+        XCTAssertNil(snapshot.ideas.first?.subpillar)
+    }
+
     /// An app older than the v3 chat pushes only the v2 context; its planner posts become snapshot posts.
     func testAnOlderAppsContextReadsAsALegacySnapshot() throws {
         let account = UUID(uuidString: SnapshotFixture.profile)!
@@ -68,6 +104,8 @@ final class IrisSnapshotTests: XCTestCase {
         XCTAssertEqual(snapshot.posts[0].cta, "Come along")
         XCTAssertEqual(snapshot.series.first?.episodes.first?.date, "2026-10-08")
         XCTAssertEqual(snapshot.tasks, [])
+        XCTAssertEqual(snapshot.pillars.map(\.subpillars), [[]])
+        XCTAssertEqual(snapshot.posts.map(\.subpillar), [nil, nil])
     }
 }
 
@@ -97,6 +135,16 @@ final class SnapshotStoreTests: XCTestCase {
         XCTAssertEqual(reopened.snapshot(profileID: nil)?.snapshot.profileID, other)
         let mode = try FileManager.default.attributesOfItem(atPath: folder.appendingPathComponent("snapshots/\(other).json").path)[.posixPermissions] as? Int
         XCTAssertEqual(mode, 0o600)
+    }
+
+    func testSubpillarsSurviveBeingKeptOnDisk() throws {
+        let store = SnapshotStore(folder: folder.appendingPathComponent("snapshots"), legacy: context)
+        XCTAssertNil(store.push(profileId: SnapshotFixture.profile, revision: "rev-1", snapshot: SnapshotFixture.subpillarsJSON))
+        let reopened = SnapshotStore(folder: folder.appendingPathComponent("snapshots"), legacy: context)
+        let held = try XCTUnwrap(reopened.snapshot(profileID: SnapshotFixture.profile)).snapshot
+        XCTAssertEqual(held.pillars[0].subpillars.map(\.name), ["Kettle rituals", "Window light"])
+        XCTAssertEqual(held.posts[0].subpillar, "Kettle rituals")
+        XCTAssertEqual(held.ideas[0].subpillar, "Kettle rituals")
     }
 
     func testAPushIsRefusedForABadIdAnUnknownSchemaOrTooMuch() {

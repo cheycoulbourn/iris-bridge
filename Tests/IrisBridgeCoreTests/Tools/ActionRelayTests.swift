@@ -40,6 +40,71 @@ final class IrisChangeToolsTests: XCTestCase {
         XCTAssertEqual(IrisChangeTools.origin(agent: "claude", threadId: "T", turnId: "t1"), ["source": "chat", "agent": "claude", "threadID": "T", "turnID": "t1"])
         XCTAssertEqual(IrisChangeTools.origin(agent: "codex", threadId: nil, turnId: nil), ["source": "agent", "agent": "codex"])
     }
+
+    // MARK: - Sub-pillars
+
+    /// The app checks the name against the record's pillar; the helper forwards the text as given.
+    func testASubpillarReachesTheEnvelopeUnchangedAndEmptyTextStaysEmpty() throws {
+        let cases: [(tool: String, required: [String: JSONValue])] = [
+            ("iris_create_idea", ["title": "Hill sprints", "pillar": "Training"]),
+            ("iris_update_idea", ["ideaID": "i1", "pillar": "Training"]),
+            ("iris_create_post_draft", ["title": "Hill sprints", "pillar": "Training"]),
+            ("iris_update_post_draft", ["postID": "p1", "expectedRevision": "r1"])
+        ]
+        for (tool, required) in cases {
+            for subpillar in ["Beginner", "", "  Beginner  "] {
+                var arguments = required
+                arguments["subpillar"] = .string(subpillar)
+                let sent = try IrisChangeTools.actions(tool: tool, arguments: arguments, actionId: "act_s")
+                XCTAssertEqual(sent.count, 1, tool)
+                XCTAssertEqual(sent[0]["input"]?["subpillar"], .string(subpillar), "\(tool) forwards \"\(subpillar)\" as given")
+                XCTAssertEqual(sent[0]["input"], .object(arguments), "\(tool) changes nothing else")
+            }
+            let omitted = try IrisChangeTools.actions(tool: tool, arguments: required, actionId: "act_s")
+            XCTAssertNil(omitted[0]["input"]?["subpillar"], "\(tool): left out means keep, so nothing is added")
+        }
+    }
+
+    func testADatedDraftKeepsItsSubpillarOnTheDraftAndOffTheScheduleRequest() throws {
+        for subpillar in ["Beginner", ""] {
+            let sent = try IrisChangeTools.actions(tool: "iris_create_post_draft", arguments: ["title": "Hill sprints", "pillar": "Training", "subpillar": .string(subpillar),
+                                                                                              "date": "2026-10-09", "time": "18:00"], actionId: "act_d")
+            XCTAssertEqual(sent.map { $0["name"] }, ["iris_create_post_draft", "iris_schedule_post"])
+            XCTAssertEqual(sent[0]["input"], ["title": "Hill sprints", "pillar": "Training", "subpillar": .string(subpillar)])
+            XCTAssertNil(sent[1]["input"]?["subpillar"])
+            XCTAssertEqual(sent[1]["input"], ["date": "2026-10-09", "time": "18:00"])
+        }
+    }
+
+    func testAnOkResultPassesTheAppsSummaryThrough() throws {
+        let line = "Changed “Hill sprints” · pillar · sub-pillar “Advanced” cleared"
+        let ok = IrisChangeTools.result(["status": "ok", "recordIDs": ["r1"], "activityID": "act:x", "summary": .string(line)])
+        XCTAssertFalse(ok.isError)
+        let body = try JSONValue.decode(Data(ok.text.utf8))
+        XCTAssertEqual(body["summary"], .string(line))
+        XCTAssertEqual(body["status"], "ok")
+        XCTAssertEqual(body["note"], "Saved in Iris. The creator can undo it in Activity.")
+        XCTAssertEqual(body["recordIDs"], ["r1"])
+        XCTAssertEqual(body["activityID"], "act:x")
+    }
+
+    func testAnOkResultLeavesSummaryOutWhenTheAppSendsNoneOrAnEmptyOne() throws {
+        for answer: JSONValue in [["status": "ok", "recordIDs": ["r1"], "activityID": "act:x"],
+                                  ["status": "ok", "recordIDs": ["r1"], "activityID": "act:x", "summary": ""],
+                                  ["status": "ok", "recordIDs": ["r1"], "activityID": "act:x", "summary": .null],
+                                  ["status": "ok", "recordIDs": ["r1"], "activityID": "act:x", "summary": 3]] {
+            let body = try XCTUnwrap(try JSONValue.decode(Data(IrisChangeTools.result(answer).text.utf8)).objectValue)
+            XCTAssertNil(body["summary"])
+            XCTAssertEqual(Set(body.keys), ["status", "note", "recordIDs", "activityID"])
+        }
+    }
+
+    func testQueuedAndRefusedResultsIgnoreASummary() throws {
+        let queued = IrisChangeTools.result(["status": "queued_for_review", "itemID": "item_1", "summary": "Changed “x”"])
+        XCTAssertEqual(try JSONValue.decode(Data(queued.text.utf8)), ["status": "queued_for_review", "itemID": "item_1", "note": "Waiting for the creator's approval in the Inbox."])
+        XCTAssertEqual(IrisChangeTools.result(["status": "refused", "message": "That sub-pillar is not under Training.", "summary": "Changed “x”"]),
+                       .failure("That sub-pillar is not under Training."))
+    }
 }
 
 final class ActionRelayTests: XCTestCase {

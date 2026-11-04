@@ -37,6 +37,11 @@ public enum IrisToolCatalog {
     private static let id = string("A UUID from a read tool.")
     private static let integer: JSONValue = ["type": "integer", "minimum": 0]
 
+    /// `subpillar` on ideas and post drafts only. Not in `postFields`: a series episode's post reuses those, and
+    /// the app's series schema has no such key (it refuses unknown ones).
+    private static let subpillarOnCreate = string("One of the sub-pillars iris_list_pillars lists under the record's pillar, by name; empty text for none. It must be under the pillar the record has once the change is made.")
+    private static let subpillarOnUpdate = string("One of the sub-pillars iris_list_pillars lists under the record's pillar, by name; empty text for none. It must be under the pillar the record has once the change is made. Leave it out to keep the current one.")
+
     private static var sceneInput: JSONValue {
         ["type": "object", "properties": ["id": string("An existing scene's id, when revising it."), "script": string("What is said or shown."),
                                           "shotNotes": string("How to shoot it.")]]
@@ -53,7 +58,7 @@ public enum IrisToolCatalog {
 
     public static let reads: [Tool] = [
         Tool(name: "iris_workspace_summary", kind: .read, activity: "Reading your workspace",
-             description: "Describe the creator's workspace: profiles and which one is open, pillars (the anchor one marked) and their usual weekdays, platforms with formats and weekly goals, counts of posts by stage, open tasks, ideas and series, today's date and time zone, and how old this snapshot is. Call this before planning anything.",
+             description: "Describe the creator's workspace: profiles and which one is open, pillars (the anchor one marked) with their usual weekdays and sub-pillars, platforms with formats and weekly goals, counts of posts by stage, open tasks, ideas and series, today's date and time zone, and how old this snapshot is. Call this before planning anything.",
              properties: [:], required: []),
         Tool(name: "iris_list_posts", kind: .read, activity: "Reading your posts",
              description: "List planner posts, newest date first, filtered by date range, stage, pillar, platform, series or text. Returns summaries; use iris_get_post for one post in full.",
@@ -62,7 +67,7 @@ public enum IrisToolCatalog {
                           "includeArchived": ["type": "boolean"], "offset": integer, "limit": ["type": "integer", "minimum": 1, "maximum": 100]],
              required: []),
         Tool(name: "iris_get_post", kind: .read, activity: "Reading a post",
-             description: "Read one post in full: every text field, its scenes, stage, date and revision. Pass its revision as expectedRevision when you change it.",
+             description: "Read one post in full: every text field, its scenes, stage, date, sub-pillar (when it has one) and revision. Pass its revision as expectedRevision when you change it.",
              properties: ["postID": id], required: ["postID"]),
         Tool(name: "iris_list_tasks", kind: .read, activity: "Reading your tasks",
              description: "List tasks, open ones by default, with due dates, subtasks and the post each belongs to.",
@@ -75,7 +80,7 @@ public enum IrisToolCatalog {
              description: "List series with their episode slots, dates and the post filling each slot.",
              properties: ["includeArchived": ["type": "boolean"]], required: []),
         Tool(name: "iris_list_pillars", kind: .read, activity: "Reading your pillars",
-             description: "List content pillars with their descriptions, anchor flag and usual posting weekdays.", properties: [:], required: []),
+             description: "List content pillars with their descriptions, anchor flag, usual posting weekdays and sub-pillars.", properties: [:], required: []),
         Tool(name: "iris_get_schedule", kind: .read, activity: "Reading your schedule",
              description: "For each day in a range of up to 62 days: the posts dated that day, the tasks due, and the day's focus themes.",
              properties: ["from": date, "to": date], required: ["from", "to"]),
@@ -102,15 +107,18 @@ public enum IrisToolCatalog {
             Tool(name: "iris_complete_task", kind: .change, activity: "Completing a task", description: "Mark a task done. " + rules,
                  properties: ["taskID": id], required: ["taskID"]),
             Tool(name: "iris_create_idea", kind: .change, activity: "Adding an idea", description: "Add an idea to the idea bank. " + rules,
-                 properties: ["title": string("The idea in a few words."), "note": string("More about it."), "pillar": string("An existing pillar name.")], required: ["title"]),
-            Tool(name: "iris_update_idea", kind: .change, activity: "Updating an idea", description: "Change an idea. " + rules,
-                 properties: ["ideaID": id, "title": string("New title."), "note": string("New note."), "pillar": string("An existing pillar name.")], required: ["ideaID"]),
+                 properties: ["title": string("The idea in a few words."), "note": string("More about it."), "pillar": string("An existing pillar name."),
+                              "subpillar": subpillarOnCreate], required: ["title"]),
+            Tool(name: "iris_update_idea", kind: .change, activity: "Updating an idea", description: "Change an idea's title, note, pillar or sub-pillar. " + rules,
+                 properties: ["ideaID": id, "title": string("New title."), "note": string("New note."), "pillar": string("An existing pillar name."),
+                              "subpillar": subpillarOnUpdate], required: ["ideaID"]),
             Tool(name: "iris_create_post_draft", kind: .change, activity: "Drafting a post",
                  description: "Create a post draft. Give date (and time) to also set its posting date, which waits for approval. " + rules,
-                 properties: postFields.merging(["date": date, "time": time]) { $1 }, required: ["title"]),
+                 properties: postFields.merging(["date": date, "time": time, "subpillar": subpillarOnCreate]) { $1 }, required: ["title"]),
             Tool(name: "iris_update_post_draft", kind: .change, activity: "Editing a post",
-                 description: "Change a post's text: title, hook, script, scenes, caption, CTA, notes, pillar, platform or format. Pass the revision iris_get_post returned as expectedRevision; a post changed since is not overwritten. " + rules,
-                 properties: postFields.filter { $0.key != "stage" }.merging(["postID": id, "expectedRevision": string("The revision iris_get_post returned.")]) { $1 },
+                 description: "Change a post's text: title, hook, script, scenes, caption, CTA, notes, pillar, sub-pillar, platform or format. Pass the revision iris_get_post returned as expectedRevision; a post changed since is not overwritten. " + rules,
+                 properties: postFields.filter { $0.key != "stage" }.merging(["postID": id, "expectedRevision": string("The revision iris_get_post returned."),
+                                                                                 "subpillar": subpillarOnUpdate]) { $1 },
                  required: ["postID"]),
             Tool(name: "iris_attach_to_post", kind: .change, activity: "Attaching a link", description: "Attach a link to a post. " + rules,
                  properties: ["postID": id, "url": string("An https link."), "label": string("What the link is.")], required: ["postID", "url"]),

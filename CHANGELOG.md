@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- The four change tools for ideas and post drafts (`iris_create_idea`, `iris_update_idea`,
+  `iris_create_post_draft` and `iris_update_post_draft`) take an optional `subpillar`: the name of one of the
+  sub-pillars `iris_list_pillars` lists under the record's pillar. Empty text clears it, and leaving it out
+  keeps the current one. Series episodes do not take it. An Iris build that does not know the field refuses the
+  change and saves nothing.
+- `iris_list_pillars` and `iris_workspace_summary` list each pillar's sub-pillars, and posts and ideas show their
+  `subpillar`, once the Iris build shares them. An older build's snapshot reads as before, with none.
+- A change that Iris applies now comes back with the line Iris puts in Activity as `summary`, so a sub-pillar the
+  change cleared is named.
+
 ## 0.3.0
 
 Run the install command again to pick this up. Pairs with Iris build 142, the first with the new chat. The

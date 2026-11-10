@@ -17,7 +17,7 @@ final class IrisReadToolsTests: XCTestCase {
         tools = IrisReadTools(snapshots: store, hasPairedDevices: { [unowned self] in self.paired }, now: { [unowned self] in self.now })
     }
 
-    private func push() { XCTAssertNil(store.push(profileId: SnapshotFixture.profile, revision: "rev-1", snapshot: SnapshotFixture.json)) }
+    private func push(_ snapshot: JSONValue = SnapshotFixture.json) { XCTAssertNil(store.push(profileId: SnapshotFixture.profile, revision: "rev-1", snapshot: snapshot)) }
 
     private func call(_ name: String, _ arguments: JSONValue = [:], file: StaticString = #filePath, line: UInt = #line) -> JSONValue {
         guard let result = tools.call(name, arguments.objectValue ?? [:]) else { XCTFail("\(name) is not a read tool", file: file, line: line); return .null }
@@ -111,6 +111,70 @@ final class IrisReadToolsTests: XCTestCase {
         let inbox = call("iris_list_review_items")["items"]?.arrayValue ?? []
         XCTAssertEqual(inbox.map { $0["status"] }, ["pending", "changesRequested"])
         XCTAssertEqual(inbox.last?["comment"], "Make it three episodes.")
+    }
+
+    // MARK: - Sub-pillars
+
+    private let kettle = "c0000000-0000-4000-8000-000000000001", glazing = "c0000000-0000-4000-8000-000000000002"
+    private let glazingTwin = "c0000000-0000-4000-8000-000000000003", morningLight = "c0000000-0000-4000-8000-000000000004"
+
+    private func rows(_ result: JSONValue, _ key: String) -> [String: JSONValue] {
+        Dictionary(uniqueKeysWithValues: (result[key]?.arrayValue ?? []).map { (($0["id"]?.stringValue ?? "").lowercased(), $0) })
+    }
+
+    func testPillarsShowSubpillarsOnlyForPillarsThatHaveThem() {
+        push(SnapshotFixture.subpillarsJSON)
+        let expected: JSONValue = [["name": "Kettle rituals", "detail": "The first ten minutes."], ["name": "Window light", "detail": ""]]
+        for pillars in [call("iris_list_pillars")["pillars"], call("iris_workspace_summary")["pillars"]] {
+            let list = pillars?.arrayValue ?? []
+            XCTAssertEqual(list.map { $0["name"] }, ["Slow mornings", "Studio notes", "Field trips"])
+            XCTAssertEqual(list[0]["subpillars"], expected, "the nameless entry is not shown")
+            XCTAssertNil(list[1]["subpillars"], "no sub-pillars: no key")
+            XCTAssertNil(list[2]["subpillars"], "an empty list: no key")
+            XCTAssertEqual(list[0]["usualDays"], ["Mon", "Wed", "Fri"], "the rest of the row is as before")
+        }
+    }
+
+    func testPostRowsShowSubpillarOnlyWhenSet() {
+        push(SnapshotFixture.subpillarsJSON)
+        XCTAssertEqual(call("iris_get_post", ["postID": .string(kettle)])["post"]?["subpillar"], "Kettle rituals")
+        XCTAssertEqual(call("iris_get_post", ["postID": .string(kettle)])["post"]?["hook"], "I stopped checking my phone first thing.", "full still builds on brief")
+        XCTAssertNil(call("iris_get_post", ["postID": .string(glazing)])["post"]?["subpillar"], "no key")
+        XCTAssertNil(call("iris_get_post", ["postID": .string(glazingTwin)])["post"]?["subpillar"], "empty text")
+        let listed = rows(call("iris_list_posts"), "posts")
+        XCTAssertEqual(listed[kettle]?["subpillar"], "Kettle rituals")
+        XCTAssertEqual(listed[morningLight]?["subpillar"], "Window light")
+        XCTAssertNil(listed[glazing]?["subpillar"])
+        XCTAssertNil(listed[glazingTwin]?["subpillar"])
+        let days = call("iris_get_schedule", ["from": "2026-10-06", "to": "2026-10-08"])["days"]?.arrayValue ?? []
+        XCTAssertEqual(days[0]["posts"]?.arrayValue?.first?["subpillar"], "Kettle rituals")
+        XCTAssertNil(days[1]["posts"]?.arrayValue?.first?["subpillar"])
+        XCTAssertEqual(days[2]["posts"]?.arrayValue?.first?["subpillar"], "Window light")
+        XCTAssertEqual(rows(call("iris_search", ["text": "phone", "kinds": ["post"]]), "posts")[kettle]?["subpillar"], "Kettle rituals")
+    }
+
+    func testIdeasShowSubpillarWhenSet() {
+        push(SnapshotFixture.subpillarsJSON)
+        let ideas = call("iris_list_ideas")["ideas"]?.arrayValue ?? []
+        XCTAssertEqual(ideas.map { $0["title"] }, ["A week of breakfasts", "Kiln cam", "Glaze tests"])
+        XCTAssertEqual(ideas.map { $0["subpillar"] }, ["Kettle rituals", nil, nil], "no key and empty text show nothing")
+        XCTAssertEqual(call("iris_list_ideas", ["pillar": "Slow mornings"])["ideas"]?.arrayValue?.first?["subpillar"], "Kettle rituals")
+        XCTAssertEqual(call("iris_search", ["text": "breakfasts", "kinds": ["idea"]])["ideas"]?.arrayValue?.first?["subpillar"], "Kettle rituals")
+    }
+
+    func testAnOlderAppsSnapshotShowsNoSubpillarKeysAnywhere() throws {
+        push()
+        var answers = [call("iris_workspace_summary"), call("iris_list_pillars"), call("iris_list_posts", ["includeArchived": true]),
+                       call("iris_list_ideas", ["includeArchived": true]), call("iris_find_duplicate_posts"),
+                       call("iris_get_schedule", ["from": "2026-10-05", "to": "2026-10-21"]), call("iris_search", ["text": "e"])]
+        for id in (SnapshotFixture.json["posts"]?.arrayValue ?? []).compactMap({ $0["id"]?.stringValue }) { answers.append(call("iris_get_post", ["postID": .string(id)])) }
+        XCTAssertEqual(answers.count, 12)
+        for answer in answers {
+            let text = String(decoding: answer.encoded(), as: UTF8.self)
+            XCTAssertFalse(text.contains("subpillar"), text)
+            XCTAssertNotEqual(answer, .null)
+        }
+        XCTAssertEqual(call("iris_list_posts", ["includeArchived": true])["total"]?.intValue, 5)
     }
 
     /// The snapshot reader fills a missing title, platform or format with "". Before this was fixed, such a post

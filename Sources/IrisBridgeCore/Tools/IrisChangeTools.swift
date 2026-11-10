@@ -61,6 +61,8 @@ public enum IrisChangeTools {
         case "ok":
             var body: [String: JSONValue] = ["status": "ok", "note": "Saved in Iris. The creator can undo it in Activity."]
             body["recordIDs"] = answer["recordIDs"]; body["activityID"] = answer["activityID"]
+            // The app's Activity line, such as "Changed “Hill sprints” · pillar · sub-pillar “Advanced” cleared": it names a sub-pillar the change cleared.
+            if let summary = answer["summary"]?.stringValue, !summary.isEmpty { body["summary"] = .string(summary) }
             return .json(.object(body))
         case "queued_for_review":
             return .json(["status": "queued_for_review", "itemID": answer["itemID"] ?? .null,

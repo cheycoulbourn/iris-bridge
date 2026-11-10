@@ -188,6 +188,7 @@ public struct IrisReadTools {
         if let time = post.time { body["time"] = .string(time) }
         if let seriesID = post.seriesID { body["seriesID"] = .string(seriesID) }
         if let episode = post.episode { body["episode"] = .number(Double(episode)) }
+        if let subpillar = post.subpillar { body["subpillar"] = .string(subpillar) }
         if post.archived { body["archived"] = true }
         return .object(body)
     }
@@ -215,6 +216,7 @@ public struct IrisReadTools {
     static func idea(_ idea: IrisSnapshot.Idea) -> JSONValue {
         var body: [String: JSONValue] = ["id": .string(idea.id), "revision": .string(idea.revision), "title": .string(idea.title), "note": .string(idea.note)]
         if let pillar = idea.pillar { body["pillar"] = .string(pillar) }
+        if let subpillar = idea.subpillar { body["subpillar"] = .string(subpillar) }
         return .object(body)
     }
 
@@ -233,8 +235,12 @@ public struct IrisReadTools {
 
     static func pillar(_ pillar: IrisSnapshot.Pillar) -> JSONValue {
         let names = ["", "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        return ["name": .string(pillar.name), "detail": .string(pillar.detail), "anchor": .bool(pillar.isAnchor),
-                "usualDays": .array(pillar.weekdays.map { .string(names[$0]) })]
+        var body: [String: JSONValue] = ["name": .string(pillar.name), "detail": .string(pillar.detail), "anchor": .bool(pillar.isAnchor),
+                                         "usualDays": .array(pillar.weekdays.map { .string(names[$0]) })]
+        if !pillar.subpillars.isEmpty {
+            body["subpillars"] = .array(pillar.subpillars.map { ["name": .string($0.name), "detail": .string($0.detail)] })
+        }
+        return .object(body)
     }
 
     static func reviewItem(_ item: IrisSnapshot.ReviewItem) -> JSONValue {

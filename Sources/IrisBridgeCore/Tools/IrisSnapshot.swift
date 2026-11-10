@@ -3,13 +3,25 @@ import Foundation
 /// The compact planner snapshot the Iris read tools answer from (spec §6.2 `snapshot.push`, schema 2; the
 /// plan's contract §5 lists every key). Read field by field from JSON: a missing or mistyped field takes an
 /// empty default and an unknown one is ignored, so a snapshot from a newer or older app always reads.
+///
+/// Sub-pillars arrive from a later Iris build: a pillar's `subpillars` (`name`, `detail`) and a post's or
+/// idea's `subpillar` (a name). A snapshot from an older build has none of those keys and reads without them:
+/// no sub-pillars, and no sub-pillar on any record.
 public struct IrisSnapshot: Equatable {
     public static let schemaVersion = 2
 
     public enum Source: String { case stream, legacy }
 
     public struct Profile: Equatable { public var id, name, handle: String; public var active: Bool }
-    public struct Pillar: Equatable { public var id, name, detail: String; public var isAnchor: Bool; public var weekdays: [Int] }
+    /// One sub-pillar under a pillar. Only a later Iris build shares these.
+    public struct Subpillar: Equatable { public var name, detail: String }
+    public struct Pillar: Equatable {
+        public var id, name, detail: String
+        public var isAnchor: Bool
+        public var weekdays: [Int]
+        /// Empty when the pillar has none or the Iris build does not share them.
+        public var subpillars: [Subpillar]
+    }
     public struct Platform: Equatable { public var name: String; public var formats: [String]; public var weeklyGoal: Int }
     public struct Scene: Equatable { public var id, script, shotNotes: String }
     public struct Post: Equatable {
@@ -23,6 +35,8 @@ public struct IrisSnapshot: Equatable {
         public var hook, script, caption, cta, notes: String
         public var scenes: [Scene]
         public var liveURL: String?
+        /// A sub-pillar name under `pillar`; nil when none is set or the Iris build does not share it.
+        public var subpillar: String?
     }
     public struct Subtask: Equatable { public var title: String; public var done: Bool }
     public struct TaskItem: Equatable {
@@ -38,6 +52,8 @@ public struct IrisSnapshot: Equatable {
         public var id, revision, title, note: String
         public var pillar: String?
         public var archived: Bool
+        /// A sub-pillar name under `pillar`; nil when none is set or the Iris build does not share it.
+        public var subpillar: String?
     }
     public struct Episode: Equatable { public var number: Int; public var date: String; public var postID: String? }
     public struct Series: Equatable {
@@ -79,6 +95,12 @@ public struct IrisSnapshot: Equatable {
         func flag(_ value: JSONValue?, _ key: String) -> Bool { value?[key]?.boolValue ?? false }
         func list(_ key: String) -> [JSONValue] { json[key]?.arrayValue ?? [] }
         func days(_ value: JSONValue?) -> [Int] { (value?["weekdays"]?.arrayValue ?? []).compactMap(\.intValue).filter { (1...7).contains($0) } }
+        func subpillars(_ value: JSONValue?) -> [Subpillar] {
+            (value?["subpillars"]?.arrayValue ?? []).compactMap { entry in
+                let name = text(entry, "name")
+                return name.isEmpty ? nil : Subpillar(name: name, detail: text(entry, "detail"))
+            }
+        }
 
         self.profileID = profileID
         self.revision = revision
@@ -88,7 +110,10 @@ public struct IrisSnapshot: Equatable {
         creatorName = text(json, "creatorName")
         creatorContext = optional(json, "creatorContext")
         profiles = list("profiles").map { Profile(id: text($0, "id"), name: text($0, "name"), handle: text($0, "handle"), active: flag($0, "active")) }
-        pillars = list("pillars").map { Pillar(id: text($0, "id"), name: text($0, "name"), detail: text($0, "detail"), isAnchor: flag($0, "isAnchor"), weekdays: days($0)) }
+        pillars = list("pillars").map {
+            Pillar(id: text($0, "id"), name: text($0, "name"), detail: text($0, "detail"), isAnchor: flag($0, "isAnchor"),
+                   weekdays: days($0), subpillars: subpillars($0))
+        }
         platforms = list("platforms").map {
             Platform(name: text($0, "name"), formats: ($0["formats"]?.arrayValue ?? []).compactMap(\.stringValue), weeklyGoal: $0["weeklyGoal"]?.intValue ?? 0)
         }
@@ -100,7 +125,7 @@ public struct IrisSnapshot: Equatable {
                  hook: text(post, "hook"), script: text(post, "script"), caption: text(post, "caption"), cta: text(post, "cta"),
                  notes: text(post, "notes"),
                  scenes: (post["scenes"]?.arrayValue ?? []).map { Scene(id: text($0, "id"), script: text($0, "script"), shotNotes: text($0, "shotNotes")) },
-                 liveURL: optional(post, "liveURL"))
+                 liveURL: optional(post, "liveURL"), subpillar: optional(post, "subpillar"))
         }
         tasks = list("tasks").map { task in
             TaskItem(id: text(task, "id"), revision: text(task, "revision"), title: text(task, "title"), notes: text(task, "notes"),
@@ -111,7 +136,7 @@ public struct IrisSnapshot: Equatable {
         }
         ideas = list("ideas").map {
             Idea(id: text($0, "id"), revision: text($0, "revision"), title: text($0, "title"), note: text($0, "note"),
-                 pillar: optional($0, "pillar"), archived: flag($0, "archived"))
+                 pillar: optional($0, "pillar"), archived: flag($0, "archived"), subpillar: optional($0, "subpillar"))
         }
         series = list("series").map { item in
             Series(id: text(item, "id"), revision: text(item, "revision"), name: text(item, "name"), pillar: text(item, "pillar"),
@@ -139,7 +164,7 @@ public struct IrisSnapshot: Equatable {
         creatorName = context.creatorName
         creatorContext = context.creatorContext
         profiles = []
-        pillars = context.pillars.map { Pillar(id: "", name: $0.name, detail: $0.detail, isAnchor: $0.isAnchor, weekdays: $0.weekdays) }
+        pillars = context.pillars.map { Pillar(id: "", name: $0.name, detail: $0.detail, isAnchor: $0.isAnchor, weekdays: $0.weekdays, subpillars: []) }
         platforms = context.platforms.map { Platform(name: $0.name, formats: $0.formats, weeklyGoal: $0.weeklyGoal) }
         let day = DateFormatter(); day.locale = Locale(identifier: "en_US_POSIX"); day.timeZone = timeZone; day.dateFormat = "yyyy-MM-dd"
         let clock = DateFormatter(); clock.locale = Locale(identifier: "en_US_POSIX"); clock.timeZone = timeZone; clock.dateFormat = "HH:mm"
@@ -161,7 +186,7 @@ public struct IrisSnapshot: Equatable {
                         scenes: (details["scenes"]?.arrayValue ?? []).map {
                             Scene(id: $0["id"]?.stringValue ?? "", script: $0["text"]?.stringValue ?? "", shotNotes: $0["shotNotes"]?.stringValue ?? "")
                         },
-                        liveURL: details["liveURL"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 })
+                        liveURL: details["liveURL"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }, subpillar: nil)
         }
         tasks = []; ideas = []
         series = context.series.map { item in
